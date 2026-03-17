@@ -5,12 +5,11 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 def mainMenuKeyboard(testsToday: int = 0, dailyLimit: int = 0) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     badge = f"Start Test  [{testsToday}/{dailyLimit}]" if dailyLimit else "Start Test"
-    builder.button(text=badge,       callback_data="menu:start_test")
+    builder.button(text=badge,        callback_data="menu:start_test")
     builder.button(text="My History", callback_data="menu:history")
-    builder.button(text="AI Chat",    callback_data="menu:ai_chat")
     builder.button(text="Settings",   callback_data="menu:config")
     builder.button(text="Help",       callback_data="menu:help")
-    builder.adjust(2, 2, 1)
+    builder.adjust(2, 2)
     return builder.as_markup()
 
 
@@ -96,12 +95,4 @@ def backToMainKeyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="Main Menu", callback_data="nav:main_menu")
     builder.adjust(1)
-    return builder.as_markup()
-
-
-def aiChatKeyboard() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(text="Clear Chat", callback_data="ai:clear")
-    builder.button(text="Main Menu",  callback_data="nav:main_menu")
-    builder.adjust(2)
     return builder.as_markup()
