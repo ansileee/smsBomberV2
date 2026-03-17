@@ -344,14 +344,36 @@ class Database:
     def skipApi(self, name: str) -> None:
         self._ex("INSERT OR REPLACE INTO skippedApis (name,addedAt) VALUES (?,?)", (name, time.time()))
         self._conn.commit()
+        self._invalidateSkippedCache()
 
     def unskipApi(self, name: str) -> None:
         self._ex("DELETE FROM skippedApis WHERE name=?", (name,))
         self._conn.commit()
+        self._invalidateSkippedCache()
 
     def getSkippedApiNames(self) -> set:
         rows = self._rows(self._ex("SELECT name FROM skippedApis"))
         return {r["name"] for r in rows}
+
+    # ------------------------------------------------------------------
+    # Cache helpers
+    # ------------------------------------------------------------------
+    _skippedCache: set = set()
+    _skippedCacheTime: float = 0.0
+    _SKIP_CACHE_TTL: float = 15.0
+
+    def getSkippedApiNamesCached(self) -> set:
+        import time
+        now = time.time()
+        if self._skippedCache is not None and (now - self._skippedCacheTime) < self._SKIP_CACHE_TTL:
+            return self._skippedCache
+        result = self.getSkippedApiNames()
+        self._skippedCache     = result
+        self._skippedCacheTime = now
+        return result
+
+    def _invalidateSkippedCache(self) -> None:
+        self._skippedCacheTime = 0.0
 
     def isApiSkipped(self, name: str) -> bool:
         return self._row(self._ex("SELECT name FROM skippedApis WHERE name=?", (name,))) is not None

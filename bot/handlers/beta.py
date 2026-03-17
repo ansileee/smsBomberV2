@@ -221,6 +221,7 @@ async def cbCurlSave(callback: CallbackQuery, state: FSMContext) -> None:
         return
     from bot.services.database import db
     db.addCustomApi(name=cfg["name"], method=cfg["method"], url=cfg["url"], configJson=json.dumps(cfg))
+    apiManager.invalidateCache()
     await state.clear()
     builder = InlineKeyboardBuilder()
     builder.button(text="API Manager",  callback_data="aapi:menu")
@@ -343,8 +344,8 @@ async def cbAdminAiChat(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer("GEMINI_API_KEY not set in environment.", show_alert=True)
         return
     await state.set_state(BetaStates.adminAiChat)
-    await callback.message.edit_text(ADMIN_AI_WELCOME, reply_markup=adminAiKeyboard(), parse_mode=PM)
     await callback.answer()
+    await callback.message.edit_text(ADMIN_AI_WELCOME, reply_markup=adminAiKeyboard(), parse_mode=PM)
 
 
 @router.callback_query(F.data == "beta:ai_clear")
@@ -373,9 +374,14 @@ async def handleAdminAiMessage(message: Message, state: FSMContext) -> None:
     reply    = await askGemini(prompt, systemPrompt=ADMIN_AI_SYSTEM)
 
     if not reply:
+        from bot.config import GEMINI_API_KEY
+        keySnip = (GEMINI_API_KEY[:8] + "...") if GEMINI_API_KEY else "NOT SET"
         await thinking.edit_text(
             f"{b('AI Unavailable')}\n\n"
-            f"Gemini could not be reached. Check that {c('GEMINI_API_KEY')} is set correctly in Railway.",
+            f"All Gemini models failed to respond.\n\n"
+            f"Key loaded: {c(keySnip)}\n"
+            f"Check Railway logs for the exact error.\n\n"
+            f"{i('Common causes: region restriction, quota exceeded, or invalid key.')}",
             reply_markup=adminAiKeyboard(),
             parse_mode=PM
         )

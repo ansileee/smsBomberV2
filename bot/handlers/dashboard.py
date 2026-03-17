@@ -44,12 +44,12 @@ async def showConfig(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "cfg:workers")
 async def cbCfgWorkers(callback: CallbackQuery) -> None:
+    await callback.answer()
     await callback.message.edit_text(
         f"{b('Default Workers')}\n\nSelect the default number of concurrent workers.",
         reply_markup=configWorkersKeyboard(),
         parse_mode=PM
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("cfg:set_workers:"))

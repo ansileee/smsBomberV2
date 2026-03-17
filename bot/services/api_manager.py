@@ -1,27 +1,26 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import List, Dict, Any, Tuple, Optional
 
-from apis import API_CONFIGS as _BASE_CONFIGS
+from apis import API_CONFIGS as _BASE_CONFIGS  # type: ignore
 from bot.services.database import db
+
+# Cache merged configs for 30 seconds — avoids rebuilding on every button press
+_cache: List[Dict[str, Any]] = []
+_cacheTime: float = 0.0
+_CACHE_TTL: float = 30.0
 
 
 class ApiManager:
-    """
-    Single source of truth for all API configs.
-    Merges the static apis.py list with admin-added APIs from the database.
-    No restart needed when APIs are added or deleted via the admin panel.
-    """
-
     def getMergedConfigs(self) -> List[Dict[str, Any]]:
-        """
-        Returns merged API list. Custom APIs added via bot override base APIs
-        with the same name. Purely custom APIs are appended at the end.
-        """
-        customApis = db.getAllCustomApis()
+        global _cache, _cacheTime
+        now = time.time()
+        if _cache and (now - _cacheTime) < _CACHE_TTL:
+            return _cache
 
-        # Build lookup by name (lowercased) and url for override detection
+        customApis = db.getAllCustomApis()
         customByName: Dict[str, Dict] = {}
         customByUrl:  Dict[str, Dict] = {}
         for row in customApis:
@@ -35,9 +34,8 @@ class ApiManager:
         result    = []
         seenNames = set()
 
-        # Go through base configs — replace with custom version if override exists
         for base in _BASE_CONFIGS:
-            key = base["name"].lower()
+            key      = base["name"].lower()
             override = customByName.get(key) or customByUrl.get(base["url"])
             if override:
                 result.append(override)
@@ -46,7 +44,6 @@ class ApiManager:
                 result.append(base)
                 seenNames.add(key)
 
-        # Add purely custom APIs (not overrides of base)
         for row in customApis:
             try:
                 cfg = json.loads(row["configJson"])
@@ -55,37 +52,37 @@ class ApiManager:
             except Exception:
                 pass
 
-        # Filter out skipped APIs
         skipped = db.getSkippedApiNames()
         result  = [cfg for cfg in result if cfg.get("name", "") not in skipped]
 
+        _cache     = result
+        _cacheTime = now
         return result
+
+    def invalidateCache(self) -> None:
+        """Call after adding/editing/deleting APIs so next call rebuilds."""
+        global _cache, _cacheTime
+        _cache     = []
+        _cacheTime = 0.0
 
     def validateApiJson(self, raw: str) -> Tuple[bool, Optional[Dict], str]:
         raw = raw.strip()
         if raw.startswith("```"):
-            lines = raw.splitlines()
-            lines = [l for l in lines if not l.startswith("```")]
-            raw = "\n".join(lines).strip()
-
+            lines = [l for l in raw.splitlines() if not l.startswith("```")]
+            raw   = "\n".join(lines).strip()
         try:
             cfg = json.loads(raw)
-        except json.JSONDecodeError as e:
-            return False, None, f"Invalid JSON: {e}"
-
+        except json.JSONDecodeError as ex:
+            return False, None, f"Invalid JSON: {ex}"
         if not isinstance(cfg, dict):
             return False, None, "JSON must be an object, not a list or value."
-
         for field in ["name", "method", "url"]:
             if field not in cfg:
-                return False, None, f"Missing required field: \"{field}\""
-
+                return False, None, f'Missing required field: "{field}"'
         if cfg["method"].upper() not in ["GET", "POST", "PUT", "PATCH", "DELETE"]:
             return False, None, f"Invalid method: {cfg['method']}"
-
         if not cfg["url"].startswith("http"):
             return False, None, "URL must start with http:// or https://"
-
         cfg["method"] = cfg["method"].upper()
         return True, cfg, ""
 

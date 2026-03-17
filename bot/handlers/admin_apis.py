@@ -228,12 +228,12 @@ async def cbBrowse(callback: CallbackQuery) -> None:
     if not isAdmin(callback.from_user.id):
         await callback.answer("Access denied.", show_alert=True)
         return
+    await callback.answer()
     await callback.message.edit_text(
         f"{b('Browse APIs')}\n\n{i('Choose a view.')}",
         reply_markup=browseMenuKeyboard(),
         parse_mode=PM
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("aapi:browse:"))
@@ -321,9 +321,9 @@ async def cbBrowseView(callback: CallbackQuery) -> None:
                 builder.button(text=f"Enable: {name}", callback_data=f"aapi:unskip:{api['_dbId']}")
         builder.button(text="Back", callback_data="aapi:browse")
         builder.adjust(1)
-        await callback.message.edit_text("\n".join(lines), reply_markup=builder.as_markup(), parse_mode=PM)
-
     await callback.answer()
+    await callback.message.edit_text("\n".join(lines), reply_markup=builder.as_markup(), parse_mode=PM)
+
 
 
 @router.callback_query(F.data == "aapi:skipall_dead")
@@ -413,12 +413,12 @@ async def cbDetailDb(callback: CallbackQuery) -> None:
     cfg      = json.loads(row["configJson"])
     skipped  = db.isApiSkipped(cfg["name"])
     skipStr  = f"\n{i('Currently skipped — will not be used in tests.')}" if skipped else ""
+    await callback.answer()
     await callback.message.edit_text(
         formatDetail(cfg) + skipStr,
         reply_markup=apiDetailKeyboard(dbId=dbId),
         parse_mode=PM
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("aapi:didx:"))
@@ -460,6 +460,7 @@ async def cbCopyBase(callback: CallbackQuery, state: FSMContext) -> None:
         return
     cfg  = cleanCfg(api)
     dbId = db.addCustomApi(name=cfg["name"], method=cfg["method"], url=cfg["url"], configJson=json.dumps(cfg))
+    apiManager.invalidateCache()
     await state.set_state(ApiAdminStates.waitingEditJson)
     await state.update_data(editApiId=dbId)
     await callback.message.edit_text(
@@ -486,11 +487,11 @@ async def cbRename(callback: CallbackQuery, state: FSMContext) -> None:
         return
     await state.set_state(ApiAdminStates.waitingRename)
     await state.update_data(renameApiId=dbId)
+    await callback.answer()
     await callback.message.edit_text(
         f"{b('Rename')}  {c(esc(row['name']))}\n\nType the new name.",
         parse_mode=PM
     )
-    await callback.answer()
 
 
 @router.message(StateFilter(ApiAdminStates.waitingRename))
@@ -511,6 +512,7 @@ async def handleRename(message: Message, state: FSMContext) -> None:
     cfg         = json.loads(row["configJson"])
     cfg["name"] = newName
     db.updateCustomApi(dbId, name=newName, method=cfg["method"], url=cfg["url"], configJson=json.dumps(cfg))
+    apiManager.invalidateCache()
     await state.clear()
     await message.answer(
         f"Renamed to: {c(esc(newName))}",
@@ -536,12 +538,12 @@ async def cbEditApi(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(ApiAdminStates.waitingEditJson)
     await state.update_data(editApiId=dbId)
     cfg = json.loads(row["configJson"])
+    await callback.answer()
     await callback.message.edit_text(
         f"{b('Edit')}  {c(esc(cfg['name']))}\n\nPaste updated JSON.\n\n"
         f"Current:\n<pre>{esc(json.dumps(cfg, indent=2))}</pre>",
         parse_mode=PM
     )
-    await callback.answer()
 
 
 @router.message(StateFilter(ApiAdminStates.waitingEditJson))
@@ -578,6 +580,7 @@ async def cbConfirmEdit(callback: CallbackQuery, state: FSMContext) -> None:
         await state.clear()
         return
     db.updateCustomApi(dbId, name=cfg["name"], method=cfg["method"], url=cfg["url"], configJson=cfgJson)
+    apiManager.invalidateCache()
     await state.clear()
     await callback.message.edit_text(
         f"{b('Saved.')}  {esc(cfg['name'])} ({cfg['method']}) updated.",
@@ -602,6 +605,7 @@ async def cbDeleteApi(callback: CallbackQuery) -> None:
         await callback.answer("Not found.", show_alert=True)
         return
     db.deleteCustomApi(dbId)
+    apiManager.invalidateCache()
     await callback.answer(f"Deleted: {row['name']}")
     await callback.message.edit_text(
         f"{b('Deleted.')} API removed.", reply_markup=backToApiMenuKeyboard(), parse_mode=PM
@@ -667,6 +671,7 @@ async def cbConfirmSave(callback: CallbackQuery, state: FSMContext) -> None:
         await state.clear()
         return
     db.addCustomApi(name=cfg["name"], method=cfg["method"], url=cfg["url"], configJson=cfgJson)
+    apiManager.invalidateCache()
     await state.clear()
     total   = len(getMergedTagged())
     builder = InlineKeyboardBuilder()
@@ -713,11 +718,11 @@ async def cbConfirmTest(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(ApiAdminStates.waitingConfirmTestPhone)
     builder = InlineKeyboardBuilder()
     builder.button(text="Back", callback_data="aapi:confirm_back")
+    await callback.answer()
     await callback.message.edit_text(
         f"{b('Test API')}\n\nEnter a 10-digit number to test with.",
         reply_markup=builder.as_markup(), parse_mode=PM
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data == "aapi:confirm_back")
@@ -737,11 +742,11 @@ async def cbConfirmBack(callback: CallbackQuery, state: FSMContext) -> None:
     builder.button(text="Test",      callback_data="aapi:confirm_test")
     builder.button(text="Cancel",    callback_data="aapi:menu")
     builder.adjust(2, 2)
+    await callback.answer()
     await callback.message.edit_text(
         f"{formatDetail(cfg)}\n\n{i('Save  |  Demo Test  |  Test — your number')}",
         reply_markup=builder.as_markup(), parse_mode=PM
     )
-    await callback.answer()
 
 
 @router.message(StateFilter(ApiAdminStates.waitingConfirmTestPhone))
@@ -885,11 +890,11 @@ async def cbTestOne(callback: CallbackQuery, state: FSMContext) -> None:
         return
     await state.set_state(ApiAdminStates.waitingTestPhone)
     await state.update_data(testApiDbId=dbId, testApiIdx=None)
+    await callback.answer()
     await callback.message.edit_text(
         f"{b('Test')}  {esc(api['name'])}\n{c(api['method'])}  {esc(api['url'])}\n\nEnter a 10-digit phone number.",
         parse_mode=PM
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("aapi:testoneidx:"))
@@ -905,11 +910,11 @@ async def cbTestOneIdx(callback: CallbackQuery, state: FSMContext) -> None:
     api = allApis[idx]
     await state.set_state(ApiAdminStates.waitingTestPhone)
     await state.update_data(testApiDbId=None, testApiIdx=idx)
+    await callback.answer()
     await callback.message.edit_text(
         f"{b('Test')}  {esc(api['name'])}\n{c(api['method'])}  {esc(api['url'])}\n\nEnter a 10-digit phone number.",
         parse_mode=PM
     )
-    await callback.answer()
 
 
 @router.message(StateFilter(ApiAdminStates.waitingTestPhone))
@@ -1096,11 +1101,11 @@ async def cbHcCategory(callback: CallbackQuery) -> None:
         builder.button(text="Next", callback_data=f"aapi:hccat:{cat}:{page + 1}")
     builder.button(text="Back", callback_data="aapi:health_summary")
     builder.adjust(1)
+    await callback.answer()
     await callback.message.edit_text(
         f"{b(catLabel[cat] + ' APIs')}  {c(str(total) + ' total')}\n\n{i('Tap an API to see its result.')}",
         reply_markup=builder.as_markup(), parse_mode=PM
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("aapi:hcresult:"))
@@ -1154,8 +1159,8 @@ async def cbHcResult(callback: CallbackQuery) -> None:
         builder.button(text=skipLabel, callback_data=f"aapi:hcskip:{cat}:{idx}")
         builder.button(text="Back",    callback_data=f"aapi:hccat:{cat}:{page}")
         builder.adjust(1)
-    await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode=PM)
     await callback.answer()
+    await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode=PM)
 
 
 @router.callback_query(F.data.startswith("aapi:hcskip:"))
@@ -1208,6 +1213,7 @@ async def cbHcDelete(callback: CallbackQuery) -> None:
         await callback.answer("Base APIs cannot be deleted — use Skip instead.", show_alert=True)
         return
     db.deleteCustomApi(api["_dbId"])
+    apiManager.invalidateCache()
     entries.pop(idx)
     await callback.answer(f"Deleted: {name}")
     page = idx // HC_PER_PAGE

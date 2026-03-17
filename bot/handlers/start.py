@@ -71,12 +71,12 @@ async def cbMainMenu(callback: CallbackQuery, state: FSMContext) -> None:
     userId = callback.from_user.id
     u = db.getUser(userId)
     _, testsToday, dailyLimit = db.canRunTest(userId) if u else (False, 0, 0)
+    await callback.answer()
     await callback.message.edit_text(
         mainMenuText(userId),
         reply_markup=mainMenuKeyboard(testsToday, dailyLimit),
         parse_mode=PM
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data == "menu:help")
@@ -85,5 +85,5 @@ async def cbHelp(callback: CallbackQuery) -> None:
     u      = db.getUser(userId)
     _, testsToday, dailyLimit = db.canRunTest(userId) if u else (False, 0, 0)
     text   = HELP_TEXT + f"\n\n{c(f'Your usage: {testsToday}/{dailyLimit} today')}"
-    await callback.message.edit_text(text, reply_markup=backToMainKeyboard(), parse_mode=PM)
     await callback.answer()
+    await callback.message.edit_text(text, reply_markup=backToMainKeyboard(), parse_mode=PM)

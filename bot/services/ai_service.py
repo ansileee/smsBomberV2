@@ -1,57 +1,94 @@
 """
-AI service using Google Gemini API.
-Used by beta panel admin AI chat and cURL converter fallback.
+AI service using Google Gemini API (free tier).
+Models tried in order: gemini-1.5-flash -> gemini-1.5-flash-8b -> gemini-pro
 """
 from __future__ import annotations
 
-import json
+import logging
 from typing import Optional
 
 import aiohttp
 
-from bot.config import GEMINI_API_KEY
-
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+logger = logging.getLogger(__name__)
 
 TIMEOUT = aiohttp.ClientTimeout(total=30)
 
+GEMINI_MODELS = [
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-8b",
+    "gemini-1.0-pro",
+    "gemini-pro",
+]
+
+BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
 
 async def askGemini(prompt: str, systemPrompt: str = "") -> Optional[str]:
-    """Send a prompt to Gemini and return the text response."""
+    """Try Gemini models in order. Returns text or None."""
+    from bot.config import GEMINI_API_KEY
     if not GEMINI_API_KEY:
+        logger.warning("GEMINI_API_KEY not set")
         return None
 
-    payload = {
+    payload: dict = {
         "contents": [
             {"role": "user", "parts": [{"text": prompt}]}
         ],
+        "generationConfig": {
+            "temperature": 0.7,
+            "maxOutputTokens": 1024,
+        },
     }
-
     if systemPrompt:
         payload["system_instruction"] = {
             "parts": [{"text": systemPrompt}]
         }
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{GEMINI_URL}?key={GEMINI_API_KEY}",
-                json=payload,
-                timeout=TIMEOUT,
-            ) as resp:
-                if resp.status != 200:
-                    return None
-                data = await resp.json()
-                text = (
-                    data.get("candidates", [{}])[0]
-                    .get("content", {})
-                    .get("parts", [{}])[0]
-                    .get("text", "")
-                    .strip()
-                )
-                return text if text else None
-    except Exception:
-        return None
+    async with aiohttp.ClientSession() as session:
+        for model in GEMINI_MODELS:
+            url = f"{BASE_URL.format(model=model)}?key={GEMINI_API_KEY}"
+            try:
+                async with session.post(url, json=payload, timeout=TIMEOUT) as resp:
+                    raw = await resp.json(content_type=None)
+                    logger.info(f"Gemini {model}: status={resp.status}")
+
+                    if resp.status == 200:
+                        # Extract text from response
+                        candidates = raw.get("candidates", [])
+                        if candidates:
+                            parts = candidates[0].get("content", {}).get("parts", [])
+                            if parts:
+                                text = parts[0].get("text", "").strip()
+                                if text:
+                                    return text
+                        # If candidates empty, might be blocked
+                        blocked = raw.get("promptFeedback", {}).get("blockReason", "")
+                        if blocked:
+                            logger.warning(f"Gemini blocked: {blocked}")
+                            return "[Response blocked by safety filter]"
+                        logger.warning(f"Gemini {model} empty response: {raw}")
+                        continue
+
+                    elif resp.status in (400, 404):
+                        # Model not found or bad request — try next model
+                        err = raw.get("error", {}).get("message", "")
+                        logger.warning(f"Gemini {model} {resp.status}: {err}")
+                        continue
+
+                    elif resp.status == 429:
+                        logger.warning(f"Gemini {model} rate limited")
+                        return None
+
+                    else:
+                        err = raw.get("error", {}).get("message", "")
+                        logger.warning(f"Gemini {model} error {resp.status}: {err}")
+                        continue
+
+            except Exception as ex:
+                logger.warning(f"Gemini {model} exception: {ex}")
+                continue
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +126,6 @@ Be concise, technical, and direct. No emojis."""
 
 
 def buildAdminPrompt(history: list, newMessage: str) -> str:
-    """Build conversation prompt from history."""
     parts = []
     for turn in history[-8:]:
         parts.append(f"User: {turn['user']}\nAssistant: {turn['bot']}")

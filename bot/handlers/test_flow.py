@@ -262,11 +262,11 @@ async def cbStartTest(callback: CallbackQuery, state: FSMContext) -> None:
         return
     await state.clear()
     await state.set_state(TestWizard.phone)
+    await callback.answer()
     await callback.message.edit_text(
         f"{b('Start Test')}\n\nEnter the 10-digit target number.\n{i('Example: 9876543210')}",
         parse_mode=PM
     )
-    await callback.answer()
 
 
 @router.message(StateFilter(TestWizard.phone))
@@ -386,10 +386,10 @@ async def cbBackToWorkers(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(TestWizard.workers)
     data = await state.get_data()
     dur  = data.get("duration", 60)
+    await callback.answer()
     await callback.message.edit_text(
         workersText(dur), reply_markup=workersKeyboard(True), parse_mode=PM
     )
-    await callback.answer()
 
 
 async def _goToProxy(callback: CallbackQuery, state: FSMContext) -> None:
@@ -453,8 +453,8 @@ async def cbProxy(callback: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(F.data == "confirm:edit", StateFilter(TestWizard.confirm))
 async def cbConfirmEdit(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(TestWizard.duration)
-    await callback.message.edit_text(durationText(), reply_markup=durationKeyboard(), parse_mode=PM)
     await callback.answer()
+    await callback.message.edit_text(durationText(), reply_markup=durationKeyboard(), parse_mode=PM)
 
 
 @router.callback_query(F.data == "confirm:cancel", StateFilter(TestWizard.confirm))
@@ -463,12 +463,12 @@ async def cbCancel(callback: CallbackQuery, state: FSMContext) -> None:
     userId = callback.from_user.id
     u = db.getUser(userId)
     _, testsToday, dailyLimit = db.canRunTest(userId) if u else (False, 0, 0)
+    await callback.answer()
     await callback.message.edit_text(
         i("Test cancelled."),
         reply_markup=mainMenuKeyboard(testsToday, dailyLimit),
         parse_mode=PM
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data == "confirm:start", StateFilter(TestWizard.confirm))
@@ -633,7 +633,7 @@ async def cbUserHistory(callback: CallbackQuery) -> None:
             f"{c(dt)}  {h['phone']}  {formatDuration(h['duration'])}  "
             f"OTP {h['otpHits']}  REQ {h['totalReqs']}"
         )
+    await callback.answer()
     await callback.message.edit_text(
         "\n".join(lines), reply_markup=builder.as_markup(), parse_mode=PM
     )
-    await callback.answer()

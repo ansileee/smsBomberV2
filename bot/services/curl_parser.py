@@ -1,6 +1,6 @@
 """
 Pure Python cURL to API config converter.
-No AI needed — deterministic parsing covers all real-world cURL formats.
+Handles both bash-style and Windows CMD-style cURL (from Chrome DevTools on Windows).
 """
 from __future__ import annotations
 
@@ -8,39 +8,19 @@ import json
 import re
 import shlex
 from typing import Dict, Any, Optional, Tuple
-from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+from urllib.parse import urlparse, parse_qs, urlunparse, unquote_plus
 
-# Headers to strip completely — never useful in bot configs
 STRIP_HEADERS = {
     "cookie", ":authority", ":method", ":path", ":scheme",
     "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
-    "sec-fetch-dest", "sec-fetch-mode", "sec-fetch-site", "sec-gpc",
-    "content-length", "accept-encoding", "connection", "host",
+    "sec-fetch-dest", "sec-fetch-mode", "sec-fetch-site", "sec-fetch-storage-access",
+    "sec-gpc", "content-length", "accept-encoding", "connection", "host",
     "sec-websocket-key", "cache-control", "pragma", "te",
-    "upgrade-insecure-requests", "dnt",
+    "upgrade-insecure-requests", "dnt", "priority", "traceparent",
 }
-
-# Indian mobile prefixes for phone detection
-INDIAN_PREFIXES = {
-    "6", "7", "8", "9"
-}
-
-
-def _isIndianMobile(val: str) -> bool:
-    """True if val looks like an Indian mobile number (10 digits starting 6-9)."""
-    val = val.strip()
-    if re.fullmatch(r'[6-9]\d{9}', val):
-        return True
-    return False
 
 
 def _isIndianMobileWithCode(val: str) -> Tuple[bool, str, str]:
-    """
-    Returns (matched, prefix, digits) where prefix is one of:
-      "91"  -> digits is 10-digit number  -> use "91{phone}"
-      "+91" -> digits is 10-digit number  -> use "+91{phone}"
-      ""    -> plain 10-digit             -> use "{phone}"
-    """
     val = val.strip()
     if re.fullmatch(r'\+91[6-9]\d{9}', val):
         return True, "+91", val[3:]
@@ -52,39 +32,24 @@ def _isIndianMobileWithCode(val: str) -> Tuple[bool, str, str]:
 
 
 def _replacePhonesInString(val: str) -> str:
-    """Replace any Indian mobile number in a string value."""
-    # +91XXXXXXXXXX
     val = re.sub(r'\+91([6-9]\d{9})', r'+91{phone}', val)
-    # 91XXXXXXXXXX (as string, not integer)
     val = re.sub(r'(?<!\d)91([6-9]\d{9})(?!\d)', r'91{phone}', val)
-    # plain 10-digit
     val = re.sub(r'(?<!\d)([6-9]\d{9})(?!\d)', r'{phone}', val)
     return val
 
 
-def _replacePhoneInValue(val: Any, original_was_int: bool = False) -> Any:
-    """Replace phone in a value, preserving type if original was int."""
+def _replacePhoneInValue(val: Any) -> Any:
     if isinstance(val, str):
-        matched, prefix, digits = _isIndianMobileWithCode(val)
+        matched, prefix, _ = _isIndianMobileWithCode(val)
         if matched:
-            if prefix == "+91":
-                return "+91{phone}"
-            elif prefix == "91":
-                return "91{phone}"
-            else:
-                return "{phone}"
-        # partial match inside a longer string
+            return f"{prefix}{{phone}}" if prefix else "{phone}"
         return _replacePhonesInString(val)
     if isinstance(val, int):
         sval = str(val)
-        matched, prefix, digits = _isIndianMobileWithCode(sval)
+        matched, prefix, _ = _isIndianMobileWithCode(sval)
         if matched:
-            if prefix == "91":
-                # Return as raw string that will be treated as integer placeholder
-                # We'll mark it specially
-                return "__INT__91{phone}"
-            elif prefix == "":
-                return "__INT__{phone}"
+            # Return as string placeholder — will be noted to user
+            return f"__INT__{prefix}{{phone}}" if prefix else "__INT__{phone}"
         return val
     if isinstance(val, dict):
         return {k: _replacePhoneInValue(v) for k, v in val.items()}
@@ -94,9 +59,8 @@ def _replacePhoneInValue(val: Any, original_was_int: bool = False) -> Any:
 
 
 def _cleanIntPlaceholders(obj: Any) -> Any:
-    """Convert __INT__... markers back to proper int-typed placeholders in JSON."""
     if isinstance(obj, str) and obj.startswith("__INT__"):
-        return obj[7:]  # strip marker, keep as string — JSON will not quote it
+        return obj[7:]
     if isinstance(obj, dict):
         return {k: _cleanIntPlaceholders(v) for k, v in obj.items()}
     if isinstance(obj, list):
@@ -105,94 +69,120 @@ def _cleanIntPlaceholders(obj: Any) -> Any:
 
 
 def _domainToName(url: str) -> str:
-    """Extract a clean API name from URL domain."""
     try:
-        host = urlparse(url).netloc
-        # remove port
-        host = host.split(":")[0]
-        # remove www. api. etc
+        host  = urlparse(url).netloc.split(":")[0]
         parts = host.split(".")
-        # find the main domain part (second to last usually)
-        if len(parts) >= 2:
-            name = parts[-2]
-        else:
-            name = parts[0]
-        # capitalise
+        name  = parts[-2] if len(parts) >= 2 else parts[0]
         return name.capitalize()
     except Exception:
         return "API"
 
 
-def _parseBody(body: str, contentType: str) -> Tuple[Optional[Dict], Optional[Dict], str]:
-    """
-    Parse request body into (jsonData, formData, detectedContentType).
-    Returns one of jsonData or formData, not both.
-    """
+def _parseBody(body: str, contentType: str) -> Tuple[Optional[Dict], Optional[Dict]]:
     body = body.strip()
     if not body:
-        return None, None, contentType
-
-    # Try JSON first
+        return None, None
     if "json" in contentType or body.startswith("{") or body.startswith("["):
         try:
             parsed = json.loads(body)
             if isinstance(parsed, dict):
-                return parsed, None, "application/json"
+                return parsed, None
         except json.JSONDecodeError:
             pass
-
-    # Try form-encoded
-    if "form" in contentType or "urlencoded" in contentType or ("=" in body and "&" in body) or ("=" in body and not body.startswith("{")):
+    if "form" in contentType or "urlencoded" in contentType or (
+        "=" in body and not body.startswith("{")
+    ):
         try:
             pairs = {}
-            for part in body.split("&"):
+            # CMD escapes & as ^& — clean it
+            body_clean = body.replace('^&', '&').replace('^=', '=')
+            for part in body_clean.split("&"):
                 if "=" in part:
                     k, _, v = part.partition("=")
-                    from urllib.parse import unquote_plus
                     pairs[unquote_plus(k)] = unquote_plus(v)
             if pairs:
-                return None, pairs, "application/x-www-form-urlencoded"
+                return None, pairs
         except Exception:
             pass
-
-    # Fallback: try JSON again more aggressively
+    # last attempt JSON
     try:
         parsed = json.loads(body)
         if isinstance(parsed, dict):
-            return parsed, None, "application/json"
+            return parsed, None
     except Exception:
         pass
+    return None, None
 
-    return None, None, contentType
+
+def _extractCmdBody(curl: str) -> Tuple[Optional[str], str]:
+    """
+    Extract --data-raw value from Windows CMD cURL BEFORE normalization.
+    CMD format: --data-raw ^"^{^\\^"key^\\^":^\\^"val^\\^"^}^"
+    Returns (body_string, curl_with_body_token_replaced).
+    """
+    pattern = r'((?:--data-raw|--data-binary|--data-urlencode|-d)\s+)\^"(.*?)\^"(?=\s|$)'
+    m = re.search(pattern, curl, re.DOTALL)
+    if not m:
+        return None, curl
+    raw = m.group(2)
+    # Unescape CMD inner escaping
+    raw = raw.replace(r'^\^"', '"')   # ^\^" -> "
+    raw = raw.replace('^{', '{').replace('^}', '}')
+    raw = raw.replace('^[', '[').replace('^]', ']')
+    raw = raw.replace('^^', '^')
+    # Replace the matched section in the original curl with a safe placeholder
+    placeholder = m.group(1) + "'__BODY_PLACEHOLDER__'"
+    curl_clean  = curl[:m.start()] + placeholder + curl[m.end():]
+    return raw, curl_clean
+
+
+def _normalizeCmdCurl(curl: str) -> str:
+    """Convert Windows CMD cURL escape syntax to bash-style."""
+    # Join CMD line continuations: ^ at end of line
+    curl = re.sub(r'\^ *\r?\n\s*', ' ', curl)
+    # Replace ^" (CMD outer quoting) with regular "
+    curl = curl.replace('^"', '"')
+    # Remove stray ^ that CMD uses as line escape (not inside strings)
+    curl = re.sub(r'\^(?!")', '', curl)
+    return curl
 
 
 def parseCurl(curl: str) -> Tuple[bool, Optional[Dict[str, Any]], str]:
     """
-    Parse a cURL command into our API config format.
+    Parse a cURL command into API config format.
     Returns (success, config, errorMessage).
     """
     curl = curl.strip()
 
-    # Normalize line continuations
-    curl = re.sub(r'\\\n\s*', ' ', curl)
-    curl = re.sub(r'\\\r\n\s*', ' ', curl)
+    # Detect Windows CMD format
+    isCmdFormat = '^"' in curl or re.search(r'\^\s*\r?\n', curl) is not None
 
-    # Remove leading 'curl' and optional flags like curl.exe
+    body = ""
+    if isCmdFormat:
+        # Extract body FIRST before normalization corrupts inner quotes
+        extracted, curl = _extractCmdBody(curl)
+        if extracted is not None:
+            body = extracted
+        curl = _normalizeCmdCurl(curl)
+    else:
+        # Bash: normalize backslash line continuations
+        curl = re.sub(r'\\\n\s*', ' ', curl)
+        curl = re.sub(r'\\\r\n\s*', ' ', curl)
+
+    # Strip leading 'curl' / 'curl.exe'
     curl = re.sub(r'^curl(?:\.exe)?\s+', '', curl, flags=re.IGNORECASE).strip()
 
-    # Tokenize using shlex (handles quoted strings properly)
+    # Tokenize
     try:
         tokens = shlex.split(curl)
     except ValueError:
-        # shlex failed — try basic split
         tokens = curl.split()
 
-    url          = ""
-    method       = "GET"
+    url         = ""
+    method      = "GET"
     headers: Dict[str, str] = {}
     cookies: Dict[str, str] = {}
-    body         = ""
-    contentType  = ""
+    contentType = ""
     params: Dict[str, str] = {}
 
     idx = 0
@@ -207,14 +197,13 @@ def parseCurl(curl: str) -> Tuple[bool, Optional[Dict[str, Any]], str]:
             raw = tokens[idx + 1]
             if ":" in raw:
                 key, _, val = raw.partition(":")
-                key  = key.strip().lower()
-                val  = val.strip()
+                key = key.strip().lower()
+                val = val.strip()
                 if key not in STRIP_HEADERS:
                     if key == "content-type":
                         contentType = val.lower()
                         headers[key] = val
                     elif key == "cookie":
-                        # parse cookie header into cookies dict
                         for pair in val.split(";"):
                             pair = pair.strip()
                             if "=" in pair:
@@ -234,7 +223,11 @@ def parseCurl(curl: str) -> Tuple[bool, Optional[Dict[str, Any]], str]:
             idx += 2
 
         elif tok in ("-d", "--data", "--data-raw", "--data-binary", "--data-urlencode") and idx + 1 < len(tokens):
-            body = tokens[idx + 1]
+            val = tokens[idx + 1]
+            if val != "__BODY_PLACEHOLDER__" and not body:
+                body = val
+            elif val == "__BODY_PLACEHOLDER__":
+                pass  # already extracted above
             if method == "GET":
                 method = "POST"
             idx += 2
@@ -243,21 +236,18 @@ def parseCurl(curl: str) -> Tuple[bool, Optional[Dict[str, Any]], str]:
             method = "GET"
             idx += 1
 
-        elif tok == "--compressed":
-            idx += 1
-
-        elif tok in ("-L", "--location", "-s", "--silent", "-k", "--insecure",
-                     "-v", "--verbose", "--http2", "--http1.1"):
+        elif tok in ("--compressed", "-L", "--location", "-s", "--silent",
+                     "-k", "--insecure", "-v", "--verbose",
+                     "--http2", "--http1.1"):
             idx += 1
 
         elif tok in ("-o", "--output", "-u", "--user", "--proxy",
                      "--connect-timeout", "--max-time", "-m", "--retry"):
-            idx += 2  # skip value too
+            idx += 2
 
         elif not tok.startswith("-"):
-            # This is the URL
             if not url:
-                url = tok
+                url = tok.lstrip("^")
             idx += 1
 
         else:
@@ -266,73 +256,53 @@ def parseCurl(curl: str) -> Tuple[bool, Optional[Dict[str, Any]], str]:
     if not url:
         return False, None, "Could not find URL in the cURL command."
 
-    # Extract query params from URL and move them to params dict if GET
+    # Strip any stray ^ that Telegram may preserve from CMD format
+    url = url.lstrip("^")
+    if not url.startswith("http"):
+        return False, None, f"URL does not start with http — got: {url[:80]}"
+
+    # Extract query params from URL into params dict
     parsed_url = urlparse(url)
     if parsed_url.query:
         qs = parse_qs(parsed_url.query, keep_blank_values=True)
         for k, vs in qs.items():
             params[k] = vs[0] if vs else ""
-        # Clean URL of query string
         url = urlunparse(parsed_url._replace(query=""))
 
-    # Build config
+    if body and method == "GET":
+        method = "POST"
+
     name = _domainToName(url)
 
     # Parse body
-    jsonData, formData, detectedCt = _parseBody(body, contentType)
+    jsonData, formData = _parseBody(body, contentType)
 
-    # Replace phone numbers in all parts
-    url_replaced = _replacePhonesInString(url)
-
-    headers_replaced = {}
-    for k, v in headers.items():
-        headers_replaced[k] = _replacePhonesInString(v)
-
-    cookies_replaced = {}
-    for k, v in cookies.items():
-        cookies_replaced[k] = _replacePhonesInString(v)
-
-    params_replaced = {}
-    for k, v in params.items():
-        params_replaced[k] = _replacePhonesInString(v)
+    # Replace phones everywhere
+    url_final     = _replacePhonesInString(url)
+    headers_final = {k: _replacePhonesInString(v) for k, v in headers.items()}
+    cookies_final = {k: _replacePhonesInString(v) for k, v in cookies.items()}
+    params_final  = {k: _replacePhonesInString(v) for k, v in params.items()}
 
     if jsonData is not None:
         jsonData = _replacePhoneInValue(jsonData)
         jsonData = _cleanIntPlaceholders(jsonData)
-
     if formData is not None:
         formData = {k: _replacePhonesInString(v) for k, v in formData.items()}
 
-    # Build final config
     cfg: Dict[str, Any] = {
         "name":   name,
         "method": method,
-        "url":    url_replaced,
+        "url":    url_final,
     }
-
-    if headers_replaced:
-        cfg["headers"] = headers_replaced
-
+    if headers_final:
+        cfg["headers"] = headers_final
     if jsonData:
         cfg["json"] = jsonData
     elif formData:
         cfg["data"] = formData
-
-    if params_replaced:
-        cfg["params"] = params_replaced
-
-    if cookies_replaced:
-        cfg["cookies"] = cookies_replaced
-
-    # Validate minimums
-    if not cfg["url"].startswith("http"):
-        return False, None, f"URL does not start with http: {cfg['url'][:60]}"
+    if params_final:
+        cfg["params"] = params_final
+    if cookies_final:
+        cfg["cookies"] = cookies_final
 
     return True, cfg, ""
-
-
-def formatParseResult(cfg: Dict[str, Any]) -> str:
-    """Format a parsed config for display, handling int placeholders."""
-    # We need to show __INT__ values properly in the preview
-    # but the actual saved config should use them as strings with a note
-    return json.dumps(cfg, indent=2)

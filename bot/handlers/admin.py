@@ -42,12 +42,12 @@ def adminMenuKeyboard() -> InlineKeyboardMarkup:
     builder.button(text="Stats",         callback_data="adm:stats")
     builder.button(text="API Manager",   callback_data="aapi:menu")
     builder.button(text="Proxy Manager", callback_data="aprx:menu")
-    builder.button(text="Beta Tester",   callback_data="beta:menu")
     builder.button(text="Reset All",     callback_data="adm:reset_all")
     builder.button(text="Global Limit",  callback_data="adm:global_limit")
     builder.button(text="Broadcast",     callback_data="adm:broadcast")
     builder.button(text="Blacklist",     callback_data="adm:blacklist:0")
-    builder.adjust(2, 2, 1, 2, 2)
+    builder.button(text="Beta Tester",   callback_data="beta:menu")
+    builder.adjust(2, 2, 2, 2, 1)
     return builder.as_markup()
 
 
@@ -229,12 +229,12 @@ async def cbUsersList(callback: CallbackQuery) -> None:
         await callback.message.edit_text("No users registered yet.", reply_markup=backToAdminKeyboard())
         await callback.answer()
         return
+    await callback.answer()
     await callback.message.edit_text(
         f"{b('Users')}  {c(f'{total} total  page {page+1}/{totalPages}')}\n\n{i('Tap a user to manage them.')}",
         reply_markup=usersListKeyboard(page, totalPages, users),
         parse_mode=PM
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("adm:user:"))
@@ -271,12 +271,12 @@ async def cbBanPrompt(callback: CallbackQuery) -> None:
         return
     action = "unban" if u["isBanned"] else "ban"
     name   = esc(u["firstName"] or str(userId))
+    await callback.answer()
     await callback.message.edit_text(
         f"{b('Confirm')}\n\nAre you sure you want to {action} {name}?",
         reply_markup=confirmBanKeyboard(userId, bool(u["isBanned"])),
         parse_mode=PM
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("adm:toggle_ban:"))
@@ -315,11 +315,11 @@ async def cbSetLimit(callback: CallbackQuery, state: FSMContext) -> None:
     userId = int(callback.data.split(":")[2])
     await state.set_state(AdminStates.waitingSetLimit)
     await state.update_data(targetUserId=userId)
+    await callback.answer()
     await callback.message.edit_text(
         f"{b('Set Daily Limit')}\n\nEnter new limit for user {c(str(userId))}.\nNumber between {c('0')} and {c('999')}.",
         parse_mode=PM
     )
-    await callback.answer()
 
 
 @router.message(AdminStates.waitingSetLimit)
@@ -374,12 +374,12 @@ async def cbResetAll(callback: CallbackQuery) -> None:
     if not isAdmin(callback.from_user.id):
         await callback.answer("Access denied.", show_alert=True)
         return
+    await callback.answer()
     await callback.message.edit_text(
         f"{b('Reset All Limits')}\n\nThis will reset today's test count for every user. Are you sure?",
         reply_markup=confirmResetAllKeyboard(),
         parse_mode=PM
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data == "adm:confirm_reset_all")
@@ -402,11 +402,11 @@ async def cbGlobalLimit(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer("Access denied.", show_alert=True)
         return
     await state.set_state(AdminStates.waitingGlobalLimit)
+    await callback.answer()
     await callback.message.edit_text(
         f"{b('Set Global Daily Limit')}\n\nEnter a number to update the daily limit for every user.",
         parse_mode=PM
     )
-    await callback.answer()
 
 
 @router.message(AdminStates.waitingGlobalLimit)
@@ -478,12 +478,12 @@ async def cbDmUser(callback: CallbackQuery, state: FSMContext) -> None:
     builder = InlineKeyboardBuilder()
     builder.button(text="Cancel", callback_data=f"adm:user:{userId}")
     name = esc(u["firstName"] or str(userId))
+    await callback.answer()
     await callback.message.edit_text(
         f"{b('Send DM')}\n\nType the message to send to {name}.\nSupports HTML formatting.",
         reply_markup=builder.as_markup(),
         parse_mode=PM
     )
-    await callback.answer()
 
 
 @router.message(AdminStates.waitingDmMessage)
@@ -632,12 +632,12 @@ async def cbBlacklist(callback: CallbackQuery, state: FSMContext) -> None:
         reason = f"  - {e['reason']}" if e.get("reason") else ""
         dt     = datetime.fromtimestamp(e["addedAt"], tz=IST).strftime("%d %b %Y")
         lines.append(f"{e['phone']}{reason}  ({dt})")
+    await callback.answer()
     await callback.message.edit_text(
         "\n".join(lines),
         reply_markup=blacklistKeyboard(page, totalPages, entries),
         parse_mode=PM
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data == "adm:bl_add")
@@ -646,11 +646,11 @@ async def cbBlAdd(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer("Access denied.", show_alert=True)
         return
     await state.set_state(AdminStates.waitingBlacklistPhone)
+    await callback.answer()
     await callback.message.edit_text(
         f"{b('Add to Blacklist')}\n\nEnter the 10-digit phone number to permanently block.",
         parse_mode=PM
     )
-    await callback.answer()
 
 
 @router.message(AdminStates.waitingBlacklistPhone)
