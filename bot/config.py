@@ -17,7 +17,7 @@ _ROOT: str = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_FILE: str = os.path.join(_ROOT, "bot_data.db")
 
 ADMIN_ID: int = 961369378
-PROTECTED_NUMBER: str = "87075046930"
+PROTECTED_NUMBER: str = "8075046930"
 DEFAULT_DAILY_LIMIT: int = 10
 DASHBOARD_UPDATE_INTERVAL: float = 2.0
 PROXY_FILE: str = os.path.join(_ROOT, "proxies.txt")
