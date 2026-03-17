@@ -2,53 +2,57 @@ from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 
-def mainMenuKeyboard() -> InlineKeyboardMarkup:
+def mainMenuKeyboard(testsToday: int = 0, dailyLimit: int = 0) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="Start Test", callback_data="menu:start_test")
+    badge = f"Start Test  [{testsToday}/{dailyLimit}]" if dailyLimit else "Start Test"
+    builder.button(text=badge,       callback_data="menu:start_test")
     builder.button(text="My History", callback_data="menu:history")
+    builder.button(text="AI Chat",    callback_data="menu:ai_chat")
     builder.button(text="Settings",   callback_data="menu:config")
     builder.button(text="Help",       callback_data="menu:help")
-    builder.adjust(2, 2)
+    builder.adjust(2, 2, 1)
     return builder.as_markup()
 
 
-def wizardKeyboard(hasDuration: bool, hasWorkers: bool) -> InlineKeyboardMarkup:
+def durationKeyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="30s",     callback_data="dur:30")
-    builder.button(text="1 min",   callback_data="dur:60")
-    builder.button(text="5 min",   callback_data="dur:300")
-    builder.button(text="10 min",  callback_data="dur:600")
+    builder.button(text="30s",    callback_data="dur:30")
+    builder.button(text="1 min",  callback_data="dur:60")
+    builder.button(text="5 min",  callback_data="dur:300")
+    builder.button(text="10 min", callback_data="dur:600")
+    builder.button(text="Custom duration", callback_data="dur:custom")
+    builder.button(text="Back",   callback_data="nav:main_menu")
+    builder.adjust(4, 1, 1)
+    return builder.as_markup()
+
+
+def workersKeyboard(hasDuration: bool) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
     builder.button(text="2 workers",  callback_data="wrk:2")
     builder.button(text="4 workers",  callback_data="wrk:4")
     builder.button(text="8 workers",  callback_data="wrk:8")
     builder.button(text="16 workers", callback_data="wrk:16")
-    builder.button(text="Custom duration", callback_data="dur:custom")
-    builder.button(text="Custom workers",  callback_data="wrk:custom")
-    if hasDuration and hasWorkers:
-        builder.button(text="Continue -->", callback_data="wizard:continue")
-        builder.button(text="Back",         callback_data="nav:main_menu")
-        builder.adjust(4, 4, 2, 1, 1)
-    else:
-        builder.button(text="Back", callback_data="nav:main_menu")
-        builder.adjust(4, 4, 2, 1)
+    builder.button(text="Custom workers", callback_data="wrk:custom")
+    builder.button(text="Back",           callback_data="nav:wizard_duration")
+    builder.adjust(4, 1, 1)
     return builder.as_markup()
 
 
 def proxyKeyboard(hasProxies: bool) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="No proxy",   callback_data="proxy:none")
+    builder.button(text="No proxy",  callback_data="proxy:none")
     if hasProxies:
         builder.button(text="Use proxy", callback_data="proxy:file")
-    builder.button(text="Back",        callback_data="nav:wizard")
+    builder.button(text="Back", callback_data="nav:wizard_workers")
     builder.adjust(2 if hasProxies else 1, 1)
     return builder.as_markup()
 
 
 def confirmKeyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="Launch",  callback_data="confirm:start")
-    builder.button(text="Edit",    callback_data="confirm:edit")
-    builder.button(text="Cancel",  callback_data="confirm:cancel")
+    builder.button(text="Launch", callback_data="confirm:start")
+    builder.button(text="Edit",   callback_data="confirm:edit")
+    builder.button(text="Cancel", callback_data="confirm:cancel")
     builder.adjust(2, 1)
     return builder.as_markup()
 
@@ -92,4 +96,12 @@ def backToMainKeyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="Main Menu", callback_data="nav:main_menu")
     builder.adjust(1)
+    return builder.as_markup()
+
+
+def aiChatKeyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Clear Chat", callback_data="ai:clear")
+    builder.button(text="Main Menu",  callback_data="nav:main_menu")
+    builder.adjust(2)
     return builder.as_markup()

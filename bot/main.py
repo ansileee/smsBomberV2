@@ -6,8 +6,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from bot.config import BOT_TOKEN
-from bot.handlers import start, test_flow, dashboard, admin
-from bot.handlers import admin_apis, admin_proxy
+from bot.handlers import start, test_flow, dashboard, admin, admin_apis, admin_proxy, beta
 from bot.middleware.auth import AuthMiddleware
 from bot.services.scheduler import midnightResetLoop
 
@@ -32,10 +31,10 @@ async def main() -> None:
     dp.include_router(admin.router)
     dp.include_router(admin_apis.router)
     dp.include_router(admin_proxy.router)
+    dp.include_router(beta.router)
 
     logger.info("Bot starting...")
     try:
-        # Start scheduler inside the running loop
         asyncio.get_event_loop().create_task(midnightResetLoop())
         await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
     finally:

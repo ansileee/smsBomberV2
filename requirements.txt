@@ -2,3 +2,4 @@ aiogram==3.7.0
 aiohttp==3.9.5
 aiohttp-socks==0.8.4
 python-dotenv==1.0.1
+libsql-experimental==0.0.55; sys_platform != "win32"

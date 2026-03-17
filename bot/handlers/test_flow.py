@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Dict, Optional
+import random
 
 from aiogram import Router, F
 from aiogram.filters import StateFilter
@@ -11,16 +12,14 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from bot.keyboards.menus import (
-    wizardKeyboard, proxyKeyboard, confirmKeyboard,
-    runningKeyboard, finishedKeyboard, mainMenuKeyboard,
+    durationKeyboard, workersKeyboard, proxyKeyboard,
+    confirmKeyboard, runningKeyboard, finishedKeyboard, mainMenuKeyboard,
 )
 from bot.services.tester_runner import TesterRunner, validateProxies
 from bot.services.proxy_manager import proxyManager
 from bot.services.database import db
 from bot.config import DASHBOARD_UPDATE_INTERVAL, ADMIN_ID, PROTECTED_NUMBER
-from bot.utils import PM, b, i, c, hEsc
-
-import random
+from bot.utils import PM, b, i, c, hEsc, formatDuration
 
 router = Router()
 
@@ -39,24 +38,14 @@ PROTECTED_RESPONSES = [
 
 class TestWizard(StatesGroup):
     phone          = State()
-    wizard         = State()
+    duration       = State()
     durationCustom = State()
+    workers        = State()
     workersCustom  = State()
     proxy          = State()
     proxyChecking  = State()
     confirm        = State()
     running        = State()
-
-
-def formatDuration(seconds: int) -> str:
-    if seconds < 60:
-        return f"{seconds}s"
-    if seconds < 3600:
-        m, s = seconds // 60, seconds % 60
-        return f"{m}m {s}s" if s else f"{m}m"
-    h = seconds // 3600
-    m = (seconds % 3600) // 60
-    return f"{h}h {m}m" if m else f"{h}h"
 
 
 def parseTime(t: str) -> Optional[int]:
@@ -70,27 +59,20 @@ def parseTime(t: str) -> Optional[int]:
         return None
 
 
-def wizardText(data: dict) -> str:
-    dur   = formatDuration(data["duration"]) if data.get("duration") else "not set"
-    wrk   = str(data["workers"]) if data.get("workers") else "not set"
-    phone = data.get("phone", "")
-    both  = data.get("duration") and data.get("workers")
-    hint  = "Both set — tap Continue to proceed." if both else "Select duration and workers below."
-    # Show active API count
-    try:
-        from bot.services.api_manager import apiManager
-        from bot.services.database import db as _db
-        total   = len(apiManager.getMergedConfigs())
-        skipped = len(_db.getSkippedApiNames())
-        api_str = f"\nAPIs       {c(str(total - skipped))} active"
-    except Exception:
-        api_str = ""
+def durationText() -> str:
     return (
-        f"{b('Configure Test')}  {c(phone)}\n\n"
-        f"Duration   {c(dur)}\n"
-        f"Workers    {c(wrk)}"
-        f"{api_str}\n\n"
-        f"{i(hint)}"
+        f"{b('Step 1 of 2 — Duration')}\n\n"
+        f"How long should the test run?\n\n"
+        f"{i('Choose below or enter a custom value.')}"
+    )
+
+
+def workersText(duration: int) -> str:
+    return (
+        f"{b('Step 2 of 2 — Workers')}\n\n"
+        f"Duration   {c(formatDuration(duration))}\n\n"
+        f"How many concurrent workers?\n"
+        f"{i('More workers = more requests per second.')}"
     )
 
 
@@ -102,59 +84,69 @@ def buildConfirmText(data: dict, proxyInfo: str = "") -> str:
         f"Duration   {c(formatDuration(data['duration']))}\n"
         f"Workers    {c(str(data['workers']))}\n"
         f"Proxy      {c(proxyLabel)}\n\n"
-        f"{i('Tap Launch to start or Edit to go back.')}"
+        f"{i('Tap Launch to start or Edit to change settings.')}"
     )
 
 
 def buildDashboardText(snap: dict, phone: str, duration: int) -> str:
-    elapsed    = snap["elapsed"]
-    lines      = []
-    rl_count   = 0
-    dead_count = 0
+    elapsed  = snap["elapsed"]
+    remaining = max(0, duration - int(elapsed))
+    pct      = min(elapsed / duration, 1.0) if duration > 0 else 0
+
+    rlCount   = 0
+    deadCount = 0
+    lines     = []
 
     for name, s in snap["perApi"].items():
         if s.get("status") == "ratelimited":
-            rl_count += 1
+            rlCount += 1
         elif s.get("status") == "dead":
-            dead_count += 1
+            deadCount += 1
         elif s.get("requests", 0) > 0:
             conf = s.get("confirmed", 0)
             req  = s["requests"]
             ms   = s["avgMs"]
             lines.append(
-                f"<code>{hEsc(name[:16]):<16}</code>  "
+                f"<code>{hEsc(name[:14]):<14}</code>  "
                 f"{c(str(conf))} otp  {req}req  {ms}ms"
             )
 
-    apiBlock = "\n".join(lines[:10]) if lines else i("Sending requests...")
-    if len(lines) > 10:
-        apiBlock += f"\n{i(f'+ {len(lines)-10} more')}"
+    # Sort active APIs by confirmed OTPs descending
+    lines = sorted(lines, reverse=True)
 
-    bar_total  = 20
-    pct        = min(elapsed / duration, 1.0) if duration > 0 else 0
-    bar_filled = int(bar_total * pct)
-    bar        = "█" * bar_filled + "░" * (bar_total - bar_filled)
+    MAX_SHOWN = 8
+    apiBlock  = "\n".join(lines[:MAX_SHOWN]) if lines else i("Sending requests...")
+    if len(lines) > MAX_SHOWN:
+        apiBlock += f"\n{i(f'and {len(lines) - MAX_SHOWN} more active APIs')}"
+
+    barTotal  = 20
+    barFilled = int(barTotal * pct)
+    bar       = "█" * barFilled + "░" * (barTotal - barFilled)
 
     totalReqs = snap.get("totalReqs", snap.get("total", 0))
     confirmed = snap.get("confirmed", snap.get("otpSent", 0))
     responses = snap.get("responses", 0)
-    remaining = max(0, duration - int(elapsed))
-    rps_str   = str(snap["rps"])
 
-    status_bits = []
-    if rl_count:   status_bits.append(f"RL {rl_count}")
-    if dead_count: status_bits.append(f"Dead {dead_count}")
-    status_str = "  [ " + "  ".join(status_bits) + " ]" if status_bits else ""
+    # ETA display
+    if remaining > 0:
+        etaStr = f"ETA: {formatDuration(remaining)}"
+    else:
+        etaStr = "finishing..."
+
+    statusBits = []
+    if rlCount:   statusBits.append(f"RL {rlCount}")
+    if deadCount: statusBits.append(f"Dead {deadCount}")
+    statusStr = "  [ " + "  ".join(statusBits) + " ]" if statusBits else ""
 
     return (
         f"{b('Test Running')}  {c(phone)}\n"
-        f"<code>{bar}</code>  {c(f'{int(pct*100)}%')}  {i(f'{int(elapsed)}s / {duration}s')}\n\n"
-        f"Remaining   {c(formatDuration(remaining))}\n"
-        f"Requests    {c(str(totalReqs))}  {i(rps_str + ' r/s')}\n"
+        f"<code>{bar}</code>  {c(f'{int(pct*100)}%')}  {i(etaStr)}\n\n"
+        f"Elapsed     {c(formatDuration(int(elapsed)))}\n"
+        f"Requests    {c(str(totalReqs))}  {i(str(snap['rps']) + ' r/s')}\n"
         f"Confirmed   {c(str(confirmed))}\n"
         f"2xx Total   {c(str(responses))}\n"
-        f"Errors      {c(str(snap['errors']))}{status_str}\n\n"
-        f"{b('APIs')}\n{apiBlock}"
+        f"Errors      {c(str(snap['errors']))}{statusStr}\n\n"
+        f"{b('Active APIs')}\n{apiBlock}"
     )
 
 
@@ -165,21 +157,19 @@ def buildSummaryText(snap: dict, phone: str) -> str:
         reverse=True,
     )
     topLines = []
-    for name, s in sortedApis[:6]:
+    for name, s in sortedApis[:8]:
         if s.get("requests", 0) > 0:
             topLines.append(
-                f"<code>{hEsc(name[:16]):<16}</code>  "
+                f"<code>{hEsc(name[:14]):<14}</code>  "
                 f"{c(str(s.get('confirmed',0)))} otp  "
                 f"{s.get('responses',0)} ok  "
                 f"{s['requests']} req"
             )
-
     topBlock  = "\n".join(topLines) if topLines else i("No responses recorded.")
     elapsed   = int(snap["elapsed"])
     totalReqs = snap.get("totalReqs", snap.get("total", 0))
     confirmed = snap.get("confirmed", snap.get("otpSent", 0))
     responses = snap.get("responses", 0)
-
     return (
         f"{b('Test Complete')}\n"
         f"{c(phone)}\n\n"
@@ -210,11 +200,15 @@ async def dashboardLoop(runner, message, phone, duration, userId, state):
         summaryShown[userId] = True
         snap = runner.stats.snapshot()
         _saveHistory(userId, snap)
-        _lastConfig[userId] = {"phone": runner.phone, "duration": runner.duration, "workers": runner.workers}
+        db.saveLastConfig(userId, runner.phone, runner.duration, runner.workers)
+        summaryText = buildSummaryText(snap, phone)
         try:
-            await message.edit_text(buildSummaryText(snap, phone), reply_markup=finishedKeyboard(), parse_mode=PM)
+            await message.edit_text(summaryText, reply_markup=finishedKeyboard(), parse_mode=PM)
         except Exception:
-            await message.answer(buildSummaryText(snap, phone), reply_markup=finishedKeyboard(), parse_mode=PM)
+            try:
+                await message.answer(summaryText, reply_markup=finishedKeyboard(), parse_mode=PM)
+            except Exception:
+                pass
 
     activeRunners.pop(userId, None)
     dashboardTasks.pop(userId, None)
@@ -237,6 +231,10 @@ def _saveHistory(userId, snap):
         except Exception:
             pass
 
+
+# ---------------------------------------------------------------------------
+# Wizard: step 1 — enter phone
+# ---------------------------------------------------------------------------
 
 @router.callback_query(F.data == "menu:start_test")
 async def cbStartTest(callback: CallbackQuery, state: FSMContext) -> None:
@@ -286,34 +284,33 @@ async def handlePhone(message: Message, state: FSMContext) -> None:
     if db.isPhoneBlacklisted(phone) and message.from_user.id != ADMIN_ID:
         await message.answer("That number is not available for testing.")
         return
-    await state.update_data(phone=phone, duration=None, workers=None)
-    await state.set_state(TestWizard.wizard)
-    await message.answer(
-        wizardText({"phone": phone}),
-        reply_markup=wizardKeyboard(False, False),
-        parse_mode=PM
-    )
+    await state.update_data(phone=phone)
+    await state.set_state(TestWizard.duration)
+    await message.answer(durationText(), reply_markup=durationKeyboard(), parse_mode=PM)
 
 
-@router.callback_query(F.data.startswith("dur:"), StateFilter(TestWizard.wizard))
+# ---------------------------------------------------------------------------
+# Wizard: step 2 — duration
+# ---------------------------------------------------------------------------
+
+@router.callback_query(F.data.startswith("dur:"), StateFilter(TestWizard.duration))
 async def cbDuration(callback: CallbackQuery, state: FSMContext) -> None:
     value = callback.data.split(":")[1]
     if value == "custom":
         await state.set_state(TestWizard.durationCustom)
         builder = InlineKeyboardBuilder()
-        builder.button(text="Back", callback_data="nav:wizard")
+        builder.button(text="Back", callback_data="nav:wizard_duration")
         await callback.message.edit_text(
             f"{b('Custom Duration')}\n\nEnter a value: {c('30s')}  {c('5m')}  {c('1h')}\n{i('Min: 5s  Max: 24h')}",
             reply_markup=builder.as_markup(), parse_mode=PM
         )
         await callback.answer()
         return
-    data = await state.get_data()
-    data["duration"] = int(value)
     await state.update_data(duration=int(value))
+    await state.set_state(TestWizard.workers)
     await callback.message.edit_text(
-        wizardText(data),
-        reply_markup=wizardKeyboard(True, bool(data.get("workers"))),
+        workersText(int(value)),
+        reply_markup=workersKeyboard(True),
         parse_mode=PM
     )
     await callback.answer(f"Duration: {formatDuration(int(value))}")
@@ -328,38 +325,41 @@ async def handleDurationCustom(message: Message, state: FSMContext) -> None:
             parse_mode=PM
         )
         return
-    data = await state.get_data()
-    data["duration"] = seconds
     await state.update_data(duration=seconds)
-    await state.set_state(TestWizard.wizard)
+    await state.set_state(TestWizard.workers)
     await message.answer(
-        wizardText(data),
-        reply_markup=wizardKeyboard(True, bool(data.get("workers"))),
+        workersText(seconds),
+        reply_markup=workersKeyboard(True),
         parse_mode=PM
     )
 
 
-@router.callback_query(F.data.startswith("wrk:"), StateFilter(TestWizard.wizard))
+@router.callback_query(F.data == "nav:wizard_duration")
+async def cbBackToDuration(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(TestWizard.duration)
+    await callback.message.edit_text(durationText(), reply_markup=durationKeyboard(), parse_mode=PM)
+    await callback.answer()
+
+
+# ---------------------------------------------------------------------------
+# Wizard: step 3 — workers
+# ---------------------------------------------------------------------------
+
+@router.callback_query(F.data.startswith("wrk:"), StateFilter(TestWizard.workers))
 async def cbWorkers(callback: CallbackQuery, state: FSMContext) -> None:
     value = callback.data.split(":")[1]
     if value == "custom":
         await state.set_state(TestWizard.workersCustom)
         builder = InlineKeyboardBuilder()
-        builder.button(text="Back", callback_data="nav:wizard")
+        builder.button(text="Back", callback_data="nav:wizard_workers")
         await callback.message.edit_text(
             f"{b('Custom Workers')}\n\nEnter a number between {c('1')} and {c('64')}.",
             reply_markup=builder.as_markup(), parse_mode=PM
         )
         await callback.answer()
         return
-    data = await state.get_data()
-    data["workers"] = int(value)
     await state.update_data(workers=int(value))
-    await callback.message.edit_text(
-        wizardText(data),
-        reply_markup=wizardKeyboard(bool(data.get("duration")), True),
-        parse_mode=PM
-    )
+    await _goToProxy(callback, state)
     await callback.answer(f"Workers: {value}")
 
 
@@ -372,43 +372,38 @@ async def handleWorkersCustom(message: Message, state: FSMContext) -> None:
     except ValueError:
         await message.answer(f"Enter a number between {c('1')} and {c('64')}.", parse_mode=PM)
         return
-    data = await state.get_data()
-    data["workers"] = workers
     await state.update_data(workers=workers)
-    await state.set_state(TestWizard.wizard)
+    await state.set_state(TestWizard.proxy)
+    hasProxies = proxyManager.hasProxies()
     await message.answer(
-        wizardText(data),
-        reply_markup=wizardKeyboard(bool(data.get("duration")), True),
-        parse_mode=PM
+        f"{b('Proxy Settings')}\n\nUse a proxy for this test?",
+        reply_markup=proxyKeyboard(hasProxies), parse_mode=PM
     )
 
 
-@router.callback_query(F.data == "nav:wizard")
-async def cbBackToWizard(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(TestWizard.wizard)
+@router.callback_query(F.data == "nav:wizard_workers")
+async def cbBackToWorkers(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(TestWizard.workers)
     data = await state.get_data()
+    dur  = data.get("duration", 60)
     await callback.message.edit_text(
-        wizardText(data),
-        reply_markup=wizardKeyboard(bool(data.get("duration")), bool(data.get("workers"))),
-        parse_mode=PM
+        workersText(dur), reply_markup=workersKeyboard(True), parse_mode=PM
     )
     await callback.answer()
 
 
-@router.callback_query(F.data == "wizard:continue", StateFilter(TestWizard.wizard))
-async def cbWizardContinue(callback: CallbackQuery, state: FSMContext) -> None:
-    data = await state.get_data()
-    if not data.get("duration") or not data.get("workers"):
-        await callback.answer("Select both duration and workers first.", show_alert=True)
-        return
+async def _goToProxy(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(TestWizard.proxy)
     hasProxies = proxyManager.hasProxies()
     await callback.message.edit_text(
         f"{b('Proxy Settings')}\n\nUse a proxy for this test?",
         reply_markup=proxyKeyboard(hasProxies), parse_mode=PM
     )
-    await callback.answer()
 
+
+# ---------------------------------------------------------------------------
+# Wizard: step 4 — proxy
+# ---------------------------------------------------------------------------
 
 @router.callback_query(F.data.startswith("proxy:"), StateFilter(TestWizard.proxy))
 async def cbProxy(callback: CallbackQuery, state: FSMContext) -> None:
@@ -432,10 +427,8 @@ async def cbProxy(callback: CallbackQuery, state: FSMContext) -> None:
             return
         working   = await validateProxies(allProxies)
         dead      = len(allProxies) - len(working)
-        await state.update_data(workingProxies=working)
         proxyInfo = f"{len(working)} working / {dead} dead" if working else "None (0 working)"
-        if not working:
-            await state.update_data(useProxy=False)
+        await state.update_data(workingProxies=working, useProxy=bool(working))
         data = await state.get_data()
         await state.set_state(TestWizard.confirm)
         await statusMsg.edit_text(
@@ -443,6 +436,7 @@ async def cbProxy(callback: CallbackQuery, state: FSMContext) -> None:
             reply_markup=confirmKeyboard(), parse_mode=PM
         )
     else:
+        await state.update_data(workingProxies=[])
         data = await state.get_data()
         await state.set_state(TestWizard.confirm)
         await callback.message.edit_text(
@@ -452,23 +446,27 @@ async def cbProxy(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer()
 
 
+# ---------------------------------------------------------------------------
+# Confirm
+# ---------------------------------------------------------------------------
+
 @router.callback_query(F.data == "confirm:edit", StateFilter(TestWizard.confirm))
 async def cbConfirmEdit(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(TestWizard.wizard)
-    data = await state.get_data()
-    await callback.message.edit_text(
-        wizardText(data),
-        reply_markup=wizardKeyboard(bool(data.get("duration")), bool(data.get("workers"))),
-        parse_mode=PM
-    )
+    await state.set_state(TestWizard.duration)
+    await callback.message.edit_text(durationText(), reply_markup=durationKeyboard(), parse_mode=PM)
     await callback.answer()
 
 
 @router.callback_query(F.data == "confirm:cancel", StateFilter(TestWizard.confirm))
 async def cbCancel(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
+    userId = callback.from_user.id
+    u = db.getUser(userId)
+    _, testsToday, dailyLimit = db.canRunTest(userId) if u else (False, 0, 0)
     await callback.message.edit_text(
-        i("Test cancelled."), reply_markup=mainMenuKeyboard(), parse_mode=PM
+        i("Test cancelled."),
+        reply_markup=mainMenuKeyboard(testsToday, dailyLimit),
+        parse_mode=PM
     )
     await callback.answer()
 
@@ -482,21 +480,23 @@ async def cbConfirmStart(callback: CallbackQuery, state: FSMContext) -> None:
     allowed, testsToday, dailyLimit = db.canRunTest(userId)
     if not allowed:
         await state.clear()
+        u = db.getUser(userId)
+        tToday, lmt = (u["testsToday"], u["dailyLimit"]) if u else (testsToday, dailyLimit)
         await callback.message.edit_text(
-            f"{b('Daily limit reached')}\n\n{c(f'{testsToday}/{dailyLimit}')} used today.\n{i('Resets at midnight IST.')}",
-            reply_markup=mainMenuKeyboard(), parse_mode=PM
+            f"{b('Daily limit reached')}\n\n{c(f'{tToday}/{lmt}')} used today.\n{i('Resets at midnight IST.')}",
+            reply_markup=mainMenuKeyboard(tToday, lmt), parse_mode=PM
         )
         await callback.answer()
         return
 
     data           = await state.get_data()
-    await state.set_state(TestWizard.running)
     phone          = data["phone"]
     duration       = data["duration"]
     workers        = data["workers"]
     useProxy       = data.get("useProxy", False)
     workingProxies = data.get("workingProxies", [])
 
+    await state.set_state(TestWizard.running)
     db.incrementTestCount(userId)
     recordId = db.startTestRecord(userId, phone, duration, workers)
     activeRecordIds[userId] = recordId
@@ -521,6 +521,10 @@ async def cbConfirmStart(callback: CallbackQuery, state: FSMContext) -> None:
     dashboardTasks[userId] = task
 
 
+# ---------------------------------------------------------------------------
+# Stop
+# ---------------------------------------------------------------------------
+
 @router.callback_query(F.data == "test:stop")
 async def cbStopTest(callback: CallbackQuery, state: FSMContext) -> None:
     userId = callback.from_user.id
@@ -540,12 +544,7 @@ async def cbStopTest(callback: CallbackQuery, state: FSMContext) -> None:
     await runner.stop()
     snap = runner.stats.snapshot()
     _saveHistory(userId, snap)
-    # Save last config for repeat
-    _lastConfig[userId] = {
-        "phone":   runner.phone,
-        "duration": runner.duration,
-        "workers":  runner.workers,
-    }
+    db.saveLastConfig(userId, runner.phone, runner.duration, runner.workers)
     activeRunners.pop(userId, None)
     summaryShown.pop(userId, None)
     activeRecordIds.pop(userId, None)
@@ -557,9 +556,9 @@ async def cbStopTest(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.message.answer(summary, reply_markup=finishedKeyboard(), parse_mode=PM)
 
 
-# Store last config per user for repeat
-_lastConfig: Dict[int, dict] = {}
-
+# ---------------------------------------------------------------------------
+# Repeat test
+# ---------------------------------------------------------------------------
 
 @router.callback_query(F.data == "test:repeat")
 async def cbRepeatTest(callback: CallbackQuery, state: FSMContext) -> None:
@@ -567,7 +566,7 @@ async def cbRepeatTest(callback: CallbackQuery, state: FSMContext) -> None:
     if userId in activeRunners:
         await callback.answer("A test is already running.", show_alert=True)
         return
-    last = _lastConfig.get(userId)
+    last = db.getLastConfig(userId)
     if not last:
         await callback.answer("No previous test to repeat.", show_alert=True)
         return
@@ -606,13 +605,18 @@ async def cbRepeatTest(callback: CallbackQuery, state: FSMContext) -> None:
     dashboardTasks[userId] = task
 
 
+# ---------------------------------------------------------------------------
+# User history
+# ---------------------------------------------------------------------------
+
 @router.callback_query(F.data == "menu:history")
 async def cbUserHistory(callback: CallbackQuery) -> None:
     userId  = callback.from_user.id
     history = db.getUserHistory(userId, limit=10)
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Main Menu", callback_data="nav:main_menu")
+
     if not history:
-        builder = InlineKeyboardBuilder()
-        builder.button(text="Main Menu", callback_data="nav:main_menu")
         await callback.message.edit_text(
             f"{b('My History')}\n\n{i('No tests run yet.')}",
             reply_markup=builder.as_markup(), parse_mode=PM
@@ -620,16 +624,15 @@ async def cbUserHistory(callback: CallbackQuery) -> None:
         await callback.answer()
         return
 
+    from datetime import datetime
+    from bot.services.database import IST
     lines = [f"{b('My History')}  {c(f'last {len(history)}')}\n"]
     for h in history:
-        from datetime import datetime
-        dt = datetime.fromtimestamp(h["startedAt"]).strftime("%d %b %H:%M")
+        dt = datetime.fromtimestamp(h["startedAt"], tz=IST).strftime("%d %b %H:%M")
         lines.append(
-            f"{c(dt)}  {h['phone']}  {h['duration']}s  "
+            f"{c(dt)}  {h['phone']}  {formatDuration(h['duration'])}  "
             f"OTP {h['otpHits']}  REQ {h['totalReqs']}"
         )
-    builder = InlineKeyboardBuilder()
-    builder.button(text="Main Menu", callback_data="nav:main_menu")
     await callback.message.edit_text(
         "\n".join(lines), reply_markup=builder.as_markup(), parse_mode=PM
     )

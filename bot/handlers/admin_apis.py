@@ -13,11 +13,10 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from bot.config import ADMIN_ID
 from bot.services.database import db
 from bot.services.api_manager import apiManager
 from bot.services.tester_runner import testSingleApi
-from bot.utils import PM, b, i, c, hEsc as _esc
+from bot.utils import PM, b, i, c, hEsc as esc, isAdmin
 
 router = Router()
 
@@ -26,10 +25,6 @@ HC_PER_PAGE        = 8
 HEALTH_CONCURRENCY = 10
 
 _healthCheckCache: dict = {}
-
-
-def isAdmin(userId: int) -> bool:
-    return userId == ADMIN_ID
 
 
 class ApiAdminStates(StatesGroup):
@@ -47,58 +42,47 @@ class ApiAdminStates(StatesGroup):
 # ---------------------------------------------------------------------------
 
 def randomPhone() -> str:
-    """
-    Generate a valid-looking Indian mobile number.
-    Uses real operator prefixes so sites don't reject on prefix validation.
-    Jio: 70,72,73,74,75,76,77,78,79,89,90,91,93,96,97,98,99
-    Airtel: 70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98
-    Vi/BSNL: 70,72,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99
-    All valid Indian mobile prefixes (6-9 start):
-    """
     prefixes = [
-        "6360","6361","6362","6363","6364","6365","6366","6367","6368","6369",
-        "7000","7001","7002","7003","7004","7005","7006","7007","7008","7009",
-        "7010","7200","7201","7202","7207","7208","7250","7300","7400","7500",
-        "7600","7700","7800","7900","8000","8001","8002","8003","8004","8005",
-        "8006","8007","8008","8009","8010","8050","8080","8090","8100","8104",
-        "8105","8106","8107","8108","8109","8110","8111","8112","8113","8800",
-        "8801","8802","8803","8804","8805","8900","8901","8902","8903","8904",
-        "9000","9001","9002","9003","9004","9005","9006","9007","9008","9009",
-        "9010","9011","9012","9013","9014","9015","9016","9017","9018","9019",
-        "9100","9101","9102","9103","9104","9105","9106","9107","9108","9109",
-        "9200","9201","9202","9203","9204","9205","9300","9301","9400","9401",
-        "9500","9600","9700","9800","9810","9820","9830","9840","9850","9860",
-        "9870","9880","9890","9900","9910","9920","9930","9940","9950","9960",
-        "9970","9980","9990","9999",
+        "6360","6361","6362","7000","7001","7002","7200","7201","7300","7400",
+        "7500","7600","7700","7800","7900","8000","8001","8002","8003","8050",
+        "8080","8100","8104","8105","8800","8801","8900","8901","9000","9001",
+        "9002","9003","9004","9005","9006","9007","9008","9009","9010","9011",
+        "9100","9101","9102","9200","9201","9300","9400","9500","9600","9700",
+        "9800","9810","9820","9830","9840","9850","9860","9870","9880","9890",
+        "9900","9910","9920","9930","9940","9950","9960","9970","9980","9990",
     ]
-    prefix = random.choice(prefixes)
+    prefix    = random.choice(prefixes)
     remaining = 10 - len(prefix)
     return prefix + "".join(random.choices(string.digits, k=remaining))
 
 
 def getMergedTagged() -> List[dict]:
-    from apis import API_CONFIGS as BASE
+    """Merge base + custom APIs with _dbId and _isOverride tags."""
+    from apis import API_CONFIGS as BASE  # type: ignore
     customApis = db.getAllCustomApis()
-
-    # Build two lookup dicts — match by name first, then url as fallback
     dbByName: dict = {}
     dbByUrl:  dict = {}
     for row in customApis:
-        cfg = json.loads(row["configJson"])
-        dbByName[cfg.get("name", "").lower()] = row
-        dbByUrl[cfg.get("url", "")]           = row
+        try:
+            cfg = json.loads(row["configJson"])
+            dbByName[cfg.get("name", "").lower()] = row
+            dbByUrl[cfg.get("url", "")]           = row
+        except Exception:
+            pass
 
     result    = []
     seenDbIds = set()
     for base in BASE:
-        # Try name match first (survives URL edits in apis.py), then URL
         row = dbByName.get(base["name"].lower()) or dbByUrl.get(base["url"])
         if row:
-            cfg = json.loads(row["configJson"])
-            cfg["_dbId"]       = row["id"]
-            cfg["_isOverride"] = True
-            result.append(cfg)
-            seenDbIds.add(row["id"])
+            try:
+                cfg = json.loads(row["configJson"])
+                cfg["_dbId"]       = row["id"]
+                cfg["_isOverride"] = True
+                result.append(cfg)
+                seenDbIds.add(row["id"])
+            except Exception:
+                pass
         else:
             entry = dict(base)
             entry["_dbId"]       = None
@@ -107,11 +91,13 @@ def getMergedTagged() -> List[dict]:
 
     for row in customApis:
         if row["id"] not in seenDbIds:
-            cfg = json.loads(row["configJson"])
-            cfg["_dbId"]       = row["id"]
-            cfg["_isOverride"] = False
-            result.append(cfg)
-
+            try:
+                cfg = json.loads(row["configJson"])
+                cfg["_dbId"]       = row["id"]
+                cfg["_isOverride"] = False
+                result.append(cfg)
+            except Exception:
+                pass
     return result
 
 
@@ -121,9 +107,9 @@ def cleanCfg(api: dict) -> dict:
 
 def formatDetail(cfg: dict) -> str:
     lines = [f"{b('API Detail')}\n"]
-    lines.append(f"Name    {c(_esc(cfg['name']))}")
+    lines.append(f"Name    {c(esc(cfg['name']))}")
     lines.append(f"Method  {c(cfg['method'])}")
-    lines.append(f"URL     {c(_esc(cfg['url']))}")
+    lines.append(f"URL     {c(esc(cfg['url']))}")
     if cfg.get("headers"):
         lines.append(f"Headers {c(str(len(cfg['headers'])))} fields")
     if cfg.get("json"):
@@ -154,11 +140,11 @@ def apiManagerMenuKeyboard() -> InlineKeyboardMarkup:
 
 def browseMenuKeyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="Recently Added",  callback_data="aapi:browse:recent")
-    builder.button(text="All APIs (A-Z)",  callback_data="aapi:browse:az")
-    builder.button(text="Dead APIs",       callback_data="aapi:browse:dead")
-    builder.button(text="Skipped APIs",    callback_data="aapi:browse:skipped")
-    builder.button(text="Back",            callback_data="aapi:menu")
+    builder.button(text="Recently Added", callback_data="aapi:browse:recent")
+    builder.button(text="All APIs (A-Z)", callback_data="aapi:browse:az")
+    builder.button(text="Dead APIs",      callback_data="aapi:browse:dead")
+    builder.button(text="Skipped APIs",   callback_data="aapi:browse:skipped")
+    builder.button(text="Back",           callback_data="aapi:menu")
     builder.adjust(2, 2, 1)
     return builder.as_markup()
 
@@ -197,14 +183,6 @@ def apiDetailKeyboard(dbId: Optional[int], globalIdx: Optional[int] = None) -> I
         builder.button(text="Test",               callback_data=f"aapi:testoneidx:{globalIdx}")
         builder.button(text="Back",               callback_data="aapi:list:0")
         builder.adjust(1, 1, 1)
-    return builder.as_markup()
-
-
-def confirmKeyboard(confirmCb: str) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(text="Save",   callback_data=confirmCb)
-    builder.button(text="Cancel", callback_data="aapi:menu")
-    builder.adjust(2)
     return builder.as_markup()
 
 
@@ -263,11 +241,10 @@ async def cbBrowseView(callback: CallbackQuery) -> None:
     if not isAdmin(callback.from_user.id):
         await callback.answer("Access denied.", show_alert=True)
         return
-
-    view     = callback.data.split(":")[2]
-    allApis  = getMergedTagged()
-    cache    = _healthCheckCache.get(f"hc_{callback.from_user.id}")
-    builder  = InlineKeyboardBuilder()
+    view    = callback.data.split(":")[2]
+    allApis = getMergedTagged()
+    cache   = _healthCheckCache.get(f"hc_{callback.from_user.id}")
+    builder = InlineKeyboardBuilder()
 
     if view == "recent":
         customApis = db.getAllCustomApis()
@@ -278,21 +255,24 @@ async def cbBrowseView(callback: CallbackQuery) -> None:
         lines = [f"{b('Recently Added')}  {c(str(len(recent)) + ' APIs')}\n"]
         for n, row in enumerate(recent, 1):
             cfg = json.loads(row["configJson"])
-            lines.append(f"{n}. {_esc(cfg['name'])}  {c(cfg['method'])}")
+            lines.append(f"{n}. {esc(cfg['name'])}  {c(cfg['method'])}")
             builder.button(text=cfg["name"], callback_data=f"aapi:ddb:{row['id']}")
         builder.button(text="Back", callback_data="aapi:browse")
         builder.adjust(1)
         await callback.message.edit_text("\n".join(lines), reply_markup=builder.as_markup(), parse_mode=PM)
 
     elif view == "az":
-        sorted_apis = sorted(allApis, key=lambda x: x["name"].lower())
-        lines = [f"{b('All APIs')}  {c(str(len(sorted_apis)) + ' total')}\n"]
-        for n, api in enumerate(sorted_apis[:20], 1):
+        sortedApis = sorted(allApis, key=lambda x: x["name"].lower())
+        lines = [f"{b('All APIs')}  {c(str(len(sortedApis)) + ' total')}\n"]
+        shown = sortedApis[:20]
+        for n, api in enumerate(shown, 1):
             tag  = " [custom]" if api.get("_dbId") and not api.get("_isOverride") else (" [edited]" if api.get("_isOverride") else " [base]")
-            lines.append(f"{n}. {_esc(api['name'])}{tag}")
+            lines.append(f"{n}. {esc(api['name'])}{tag}")
             dbId = api.get("_dbId")
-            cb   = f"aapi:ddb:{dbId}" if dbId else f"aapi:didx:{n - 1}"
+            cb   = f"aapi:ddb:{dbId}" if dbId else f"aapi:didx:{sortedApis.index(api)}"
             builder.button(text=api["name"], callback_data=cb)
+        if len(sortedApis) > 20:
+            lines.append(f"\n{i(f'Showing first 20 of {len(sortedApis)}. Use List All for full paginated view.')}")
         builder.button(text="Back", callback_data="aapi:browse")
         builder.adjust(1)
         await callback.message.edit_text("\n".join(lines), reply_markup=builder.as_markup(), parse_mode=PM)
@@ -313,8 +293,10 @@ async def cbBrowseView(callback: CallbackQuery) -> None:
         lines = [f"{b('Dead APIs')}  {c(str(len(dead)) + ' failed')}\n"]
         for n, r in enumerate(dead, 1):
             err = (r["result"].get("error") or "timeout")[:40]
-            lines.append(f"{n}. {_esc(r['name'])}  {i(err)}")
+            lines.append(f"{n}. {esc(r['name'])}  {i(err)}")
             builder.button(text=r["name"], callback_data=f"aapi:hcresult:dead:{n - 1}")
+        if dead:
+            builder.button(text="Skip All Dead", callback_data="aapi:skipall_dead")
         builder.button(text="Back", callback_data="aapi:browse")
         builder.adjust(1)
         await callback.message.edit_text("\n".join(lines), reply_markup=builder.as_markup(), parse_mode=PM)
@@ -333,7 +315,7 @@ async def cbBrowseView(callback: CallbackQuery) -> None:
             return
         lines = [f"{b('Skipped APIs')}  {c(str(len(skippedNames)) + ' skipped')}\n"]
         for n, name in enumerate(sorted(skippedNames), 1):
-            lines.append(f"{n}. {_esc(name)}")
+            lines.append(f"{n}. {esc(name)}")
             api = next((a for a in allApis if a["name"] == name and a.get("_dbId")), None)
             if api:
                 builder.button(text=f"Enable: {name}", callback_data=f"aapi:unskip:{api['_dbId']}")
@@ -342,6 +324,34 @@ async def cbBrowseView(callback: CallbackQuery) -> None:
         await callback.message.edit_text("\n".join(lines), reply_markup=builder.as_markup(), parse_mode=PM)
 
     await callback.answer()
+
+
+@router.callback_query(F.data == "aapi:skipall_dead")
+async def cbSkipAllDead(callback: CallbackQuery) -> None:
+    if not isAdmin(callback.from_user.id):
+        await callback.answer("Access denied.", show_alert=True)
+        return
+    cache = _healthCheckCache.get(f"hc_{callback.from_user.id}")
+    if not cache or not cache.get("dead"):
+        await callback.answer("No dead API data. Run health check first.", show_alert=True)
+        return
+    dead  = cache["dead"]
+    count = 0
+    for r in dead:
+        db.skipApi(r["name"])
+        count += 1
+    await callback.answer(f"Skipped {count} dead APIs.")
+    builder = InlineKeyboardBuilder()
+    builder.button(text="View Skipped", callback_data="aapi:browse:skipped")
+    builder.button(text="API Manager",  callback_data="aapi:menu")
+    builder.adjust(1)
+    await callback.message.edit_text(
+        f"{b('Auto-skip complete')}\n\n"
+        f"Skipped {c(str(count))} dead APIs.\n"
+        f"They will be excluded from future tests until you re-enable them.",
+        reply_markup=builder.as_markup(),
+        parse_mode=PM
+    )
 
 
 @router.callback_query(F.data.startswith("aapi:unskip:"))
@@ -359,7 +369,7 @@ async def cbUnskipFromBrowse(callback: CallbackQuery) -> None:
 
 
 # ---------------------------------------------------------------------------
-# List all APIs
+# List all APIs (paginated)
 # ---------------------------------------------------------------------------
 
 @router.callback_query(F.data.startswith("aapi:list:"))
@@ -377,7 +387,7 @@ async def cbListApis(callback: CallbackQuery) -> None:
     for n, api in enumerate(pageApis, start=start + 1):
         tag = " [edited]" if api.get("_isOverride") else (" [base]" if not api.get("_dbId") else " [custom]")
         url = api["url"][:48] + "..." if len(api["url"]) > 48 else api["url"]
-        lines.append(f"{n}. {_esc(api['name'])}  {api['method']}{tag}\n   {_esc(url)}")
+        lines.append(f"{n}. {esc(api['name'])}  {api['method']}{tag}\n   {esc(url)}")
     await callback.message.edit_text(
         "\n".join(lines),
         reply_markup=apiListKeyboard(page, totalPages, pageApis, start),
@@ -400,11 +410,11 @@ async def cbDetailDb(callback: CallbackQuery) -> None:
     if not row:
         await callback.answer("API not found.", show_alert=True)
         return
-    cfg = json.loads(row["configJson"])
-    skipped = db.isApiSkipped(cfg["name"])
-    skip_str = f"\n{i('Currently skipped — will not be used in tests.')}" if skipped else ""
+    cfg      = json.loads(row["configJson"])
+    skipped  = db.isApiSkipped(cfg["name"])
+    skipStr  = f"\n{i('Currently skipped — will not be used in tests.')}" if skipped else ""
     await callback.message.edit_text(
-        formatDetail(cfg) + skip_str,
+        formatDetail(cfg) + skipStr,
         reply_markup=apiDetailKeyboard(dbId=dbId),
         parse_mode=PM
     )
@@ -431,7 +441,7 @@ async def cbDetailIdx(callback: CallbackQuery) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Copy base API to DB
+# Copy base API to DB for editing
 # ---------------------------------------------------------------------------
 
 @router.callback_query(F.data.startswith("aapi:copyidx:"))
@@ -448,13 +458,13 @@ async def cbCopyBase(callback: CallbackQuery, state: FSMContext) -> None:
     if api.get("_dbId"):
         await callback.answer("Already in bot DB.", show_alert=True)
         return
-    cfg     = cleanCfg(api)
-    dbId    = db.addCustomApi(name=cfg["name"], method=cfg["method"], url=cfg["url"], configJson=json.dumps(cfg))
+    cfg  = cleanCfg(api)
+    dbId = db.addCustomApi(name=cfg["name"], method=cfg["method"], url=cfg["url"], configJson=json.dumps(cfg))
     await state.set_state(ApiAdminStates.waitingEditJson)
     await state.update_data(editApiId=dbId)
     await callback.message.edit_text(
-        f"{b('Copied to bot.')} Paste updated JSON to edit {_esc(cfg['name'])}.\n\n"
-        f"Current:\n<pre>{_esc(json.dumps(cfg, indent=2))}</pre>",
+        f"{b('Copied to bot.')} Paste updated JSON to edit {esc(cfg['name'])}.\n\n"
+        f"Current:\n<pre>{esc(json.dumps(cfg, indent=2))}</pre>",
         parse_mode=PM
     )
     await callback.answer()
@@ -477,7 +487,7 @@ async def cbRename(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(ApiAdminStates.waitingRename)
     await state.update_data(renameApiId=dbId)
     await callback.message.edit_text(
-        f"{b('Rename')}  {c(_esc(row['name']))}\n\nType the new name.",
+        f"{b('Rename')}  {c(esc(row['name']))}\n\nType the new name.",
         parse_mode=PM
     )
     await callback.answer()
@@ -503,7 +513,7 @@ async def handleRename(message: Message, state: FSMContext) -> None:
     db.updateCustomApi(dbId, name=newName, method=cfg["method"], url=cfg["url"], configJson=json.dumps(cfg))
     await state.clear()
     await message.answer(
-        f"Renamed to: {c(_esc(newName))}",
+        f"Renamed to: {c(esc(newName))}",
         reply_markup=apiDetailKeyboard(dbId=dbId),
         parse_mode=PM
     )
@@ -527,8 +537,8 @@ async def cbEditApi(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(editApiId=dbId)
     cfg = json.loads(row["configJson"])
     await callback.message.edit_text(
-        f"{b('Edit')}  {c(_esc(cfg['name']))}\n\nPaste updated JSON.\n\n"
-        f"Current:\n<pre>{_esc(json.dumps(cfg, indent=2))}</pre>",
+        f"{b('Edit')}  {c(esc(cfg['name']))}\n\nPaste updated JSON.\n\n"
+        f"Current:\n<pre>{esc(json.dumps(cfg, indent=2))}</pre>",
         parse_mode=PM
     )
     await callback.answer()
@@ -570,7 +580,7 @@ async def cbConfirmEdit(callback: CallbackQuery, state: FSMContext) -> None:
     db.updateCustomApi(dbId, name=cfg["name"], method=cfg["method"], url=cfg["url"], configJson=cfgJson)
     await state.clear()
     await callback.message.edit_text(
-        f"{b('Saved.')}  {_esc(cfg['name'])} ({cfg['method']}) updated.",
+        f"{b('Saved.')}  {esc(cfg['name'])} ({cfg['method']}) updated.",
         reply_markup=apiDetailKeyboard(dbId=dbId),
         parse_mode=PM
     )
@@ -593,7 +603,9 @@ async def cbDeleteApi(callback: CallbackQuery) -> None:
         return
     db.deleteCustomApi(dbId)
     await callback.answer(f"Deleted: {row['name']}")
-    await callback.message.edit_text(f"{b('Deleted.')} API removed.", reply_markup=backToApiMenuKeyboard(), parse_mode=PM)
+    await callback.message.edit_text(
+        f"{b('Deleted.')} API removed.", reply_markup=backToApiMenuKeyboard(), parse_mode=PM
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -606,12 +618,12 @@ async def cbAddApi(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer("Access denied.", show_alert=True)
         return
     await state.set_state(ApiAdminStates.waitingApiJson)
-    example = '{"name": "MyApp", "method": "POST", "url": "https://api.example.com/otp", "headers": {"content-type": "application/json"}, "json": {"phone": "{phone}"}}'
+    example = '{"name":"MyApp","method":"POST","url":"https://api.example.com/otp","headers":{"content-type":"application/json"},"json":{"phone":"{phone}"}}'
     await callback.message.edit_text(
         f"{b('Add API')}\n\nPaste full JSON config.\n"
         f"Required: name, method, url\n"
         f"Optional: headers, json, data, params, cookies\n\n"
-        f"Example:\n<pre>{_esc(example)}</pre>",
+        f"Example:\n<pre>{esc(example)}</pre>",
         parse_mode=PM
     )
     await callback.answer()
@@ -628,16 +640,15 @@ async def handleApiJson(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(pendingApiJson=json.dumps(cfg), pendingApiConfig=cfg)
     await state.set_state(ApiAdminStates.waitingConfirm)
-
     builder = InlineKeyboardBuilder()
-    builder.button(text="Save",        callback_data="aapi:confirm_save")
-    builder.button(text="Demo Test",   callback_data="aapi:confirm_demotest")
-    builder.button(text="Test",        callback_data="aapi:confirm_test")
-    builder.button(text="Cancel",      callback_data="aapi:menu")
+    builder.button(text="Save",      callback_data="aapi:confirm_save")
+    builder.button(text="Demo Test", callback_data="aapi:confirm_demotest")
+    builder.button(text="Test",      callback_data="aapi:confirm_test")
+    builder.button(text="Cancel",    callback_data="aapi:menu")
     builder.adjust(2, 2)
     await message.answer(
         f"{formatDetail(cfg)}\n\n"
-        f"{i('Save — add to bot  |  Demo Test — fire with random number  |  Test — enter your own number')}",
+        f"{i('Save  |  Demo Test — random number  |  Test — your number')}",
         reply_markup=builder.as_markup(),
         parse_mode=PM
     )
@@ -657,17 +668,14 @@ async def cbConfirmSave(callback: CallbackQuery, state: FSMContext) -> None:
         return
     db.addCustomApi(name=cfg["name"], method=cfg["method"], url=cfg["url"], configJson=cfgJson)
     await state.clear()
-    total = len(getMergedTagged())
-
-    # Show post-save options: test it now or go back
+    total   = len(getMergedTagged())
     builder = InlineKeyboardBuilder()
-    builder.button(text="Demo Test",   callback_data=f"aapi:postsave_demotest")
-    builder.button(text="Test",        callback_data=f"aapi:postsave_test")
+    builder.button(text="Demo Test",   callback_data="aapi:postsave_demotest")
+    builder.button(text="Test",        callback_data="aapi:postsave_test")
     builder.button(text="API Manager", callback_data="aapi:menu")
     builder.adjust(2, 1)
     await callback.message.edit_text(
-        f"{b('Saved.')}  {_esc(cfg['name'])} added.  Total APIs: {c(str(total))}\n\n"
-        f"{i('Test it now or go back.')}",
+        f"{b('Saved.')}  {esc(cfg['name'])} added.  Total APIs: {c(str(total))}\n\n{i('Test it now or go back.')}",
         reply_markup=builder.as_markup(),
         parse_mode=PM
     )
@@ -675,7 +683,7 @@ async def cbConfirmSave(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Demo Test — fire with random valid number (during add flow)
+# Demo Test and manual test (add flow)
 # ---------------------------------------------------------------------------
 
 @router.callback_query(F.data == "aapi:confirm_demotest", StateFilter(ApiAdminStates.waitingConfirm))
@@ -688,21 +696,14 @@ async def cbConfirmDemoTest(callback: CallbackQuery, state: FSMContext) -> None:
     if not cfg:
         await callback.answer("Session expired.", show_alert=True)
         return
-
     phone   = randomPhone()
     waiting = await callback.message.edit_text(
-        f"{b('Demo Test')}\n\nFiring one request with random number {c(phone)}...",
-        parse_mode=PM
+        f"{b('Demo Test')}\n\nFiring one request with random number {c(phone)}...", parse_mode=PM
     )
     await callback.answer()
-
     result = await testSingleApi(cleanCfg(cfg), phone)
     await _showTestResult(waiting, cfg, phone, result, backCb="aapi:confirm_back")
 
-
-# ---------------------------------------------------------------------------
-# Test — enter own number (during add flow)
-# ---------------------------------------------------------------------------
 
 @router.callback_query(F.data == "aapi:confirm_test", StateFilter(ApiAdminStates.waitingConfirm))
 async def cbConfirmTest(callback: CallbackQuery, state: FSMContext) -> None:
@@ -714,8 +715,7 @@ async def cbConfirmTest(callback: CallbackQuery, state: FSMContext) -> None:
     builder.button(text="Back", callback_data="aapi:confirm_back")
     await callback.message.edit_text(
         f"{b('Test API')}\n\nEnter a 10-digit number to test with.",
-        reply_markup=builder.as_markup(),
-        parse_mode=PM
+        reply_markup=builder.as_markup(), parse_mode=PM
     )
     await callback.answer()
 
@@ -738,10 +738,8 @@ async def cbConfirmBack(callback: CallbackQuery, state: FSMContext) -> None:
     builder.button(text="Cancel",    callback_data="aapi:menu")
     builder.adjust(2, 2)
     await callback.message.edit_text(
-        f"{formatDetail(cfg)}\n\n"
-        f"{i('Save  |  Demo Test — random number  |  Test — your number')}",
-        reply_markup=builder.as_markup(),
-        parse_mode=PM
+        f"{formatDetail(cfg)}\n\n{i('Save  |  Demo Test  |  Test — your number')}",
+        reply_markup=builder.as_markup(), parse_mode=PM
     )
     await callback.answer()
 
@@ -757,20 +755,19 @@ async def handleConfirmTestPhone(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     cfg  = data.get("pendingApiConfig")
     if not cfg:
-        await message.answer("Session expired. Go back and paste the API config again.")
+        await message.answer("Session expired.")
         await state.clear()
         return
     await state.set_state(ApiAdminStates.waitingConfirm)
     waiting = await message.answer(
-        f"{b('Testing')}  {_esc(cfg['name'])} with {c(phone)}...",
-        parse_mode=PM
+        f"{b('Testing')}  {esc(cfg['name'])} with {c(phone)}...", parse_mode=PM
     )
     result = await testSingleApi(cleanCfg(cfg), phone)
     await _showTestResult(waiting, cfg, phone, result, backCb="aapi:confirm_back")
 
 
 # ---------------------------------------------------------------------------
-# Post-save test buttons
+# Post-save test
 # ---------------------------------------------------------------------------
 
 @router.callback_query(F.data == "aapi:postsave_demotest")
@@ -778,7 +775,6 @@ async def cbPostSaveDemoTest(callback: CallbackQuery) -> None:
     if not isAdmin(callback.from_user.id):
         await callback.answer("Access denied.", show_alert=True)
         return
-    # Find the most recently added custom API
     customApis = db.getAllCustomApis()
     if not customApis:
         await callback.answer("No API found.", show_alert=True)
@@ -787,8 +783,7 @@ async def cbPostSaveDemoTest(callback: CallbackQuery) -> None:
     cfg   = json.loads(row["configJson"])
     phone = randomPhone()
     waiting = await callback.message.edit_text(
-        f"{b('Demo Test')}\n\nFiring one request with random number {c(phone)}...",
-        parse_mode=PM
+        f"{b('Demo Test')}\n\nFiring one request with random number {c(phone)}...", parse_mode=PM
     )
     await callback.answer()
     result = await testSingleApi(cleanCfg(cfg), phone)
@@ -804,16 +799,15 @@ async def cbPostSaveTest(callback: CallbackQuery, state: FSMContext) -> None:
     if not customApis:
         await callback.answer("No API found.", show_alert=True)
         return
-    row  = sorted(customApis, key=lambda x: x["id"], reverse=True)[0]
+    row = sorted(customApis, key=lambda x: x["id"], reverse=True)[0]
     await state.set_state(ApiAdminStates.waitingTestPhone)
     await state.update_data(testApiDbId=row["id"], testApiIdx=None)
+    cfg = json.loads(row["configJson"])
     builder = InlineKeyboardBuilder()
     builder.button(text="Back", callback_data="aapi:menu")
-    cfg = json.loads(row["configJson"])
     await callback.message.edit_text(
-        f"{b('Test')}  {_esc(cfg['name'])}\n{c(cfg['method'])}  {_esc(cfg['url'])}\n\nEnter a 10-digit phone number.",
-        reply_markup=builder.as_markup(),
-        parse_mode=PM
+        f"{b('Test')}  {esc(cfg['name'])}\n{c(cfg['method'])}  {esc(cfg['url'])}\n\nEnter a 10-digit phone number.",
+        reply_markup=builder.as_markup(), parse_mode=PM
     )
     await callback.answer()
 
@@ -827,54 +821,47 @@ async def _showTestResult(message, cfg: dict, phone: str, result: dict, backCb: 
     builder.button(text="Demo Test Again", callback_data=f"aapi:quickdemo:{cfg['name'][:20]}")
     builder.button(text="Back",            callback_data=backCb)
     builder.adjust(1)
-
     if not result["ok"]:
         await message.edit_text(
             f"{b('Test Failed')}\n\n"
-            f"API    {_esc(cfg['name'])}\n"
+            f"API    {esc(cfg['name'])}\n"
             f"Phone  {c(phone)}\n"
-            f"Error  {c(_esc(result['error']))}",
-            reply_markup=builder.as_markup(),
-            parse_mode=PM
+            f"Error  {c(esc(result['error']))}",
+            reply_markup=builder.as_markup(), parse_mode=PM
         )
         return
-
     status  = result["status"]
     latency = result["latencyMs"]
-    snippet = _esc((result.get("snippet") or "(empty)")[:120])
+    snippet = esc((result.get("snippet") or "(empty)")[:120])
     if status == 429:   lbl = "RATE LIMITED"
     elif status < 300:  lbl = "OK"
     elif status < 500:  lbl = "CLIENT ERR"
     else:               lbl = "SERVER ERR"
-
     await message.edit_text(
         f"{b('Test Result')}\n\n"
-        f"API      {_esc(cfg['name'])}\n"
+        f"API      {esc(cfg['name'])}\n"
         f"Phone    {c(phone)}\n"
         f"Status   {c(f'{lbl} {status}')}\n"
         f"Latency  {c(f'{latency}ms')}\n\n"
         f"{i('Response')}\n{c(snippet)}",
-        reply_markup=builder.as_markup(),
-        parse_mode=PM
+        reply_markup=builder.as_markup(), parse_mode=PM
     )
 
 
 @router.callback_query(F.data.startswith("aapi:quickdemo:"))
 async def cbQuickDemo(callback: CallbackQuery) -> None:
-    """Demo Test Again — re-fires with a new random number, works from anywhere."""
     if not isAdmin(callback.from_user.id):
         await callback.answer("Access denied.", show_alert=True)
         return
-    apiName  = callback.data.split(":", 2)[2]
-    allApis  = getMergedTagged()
-    api      = next((a for a in allApis if a["name"][:20] == apiName), None)
+    apiName = callback.data.split(":", 2)[2]
+    allApis = getMergedTagged()
+    api     = next((a for a in allApis if a["name"][:20] == apiName), None)
     if not api:
         await callback.answer("API not found.", show_alert=True)
         return
     phone   = randomPhone()
     waiting = await callback.message.edit_text(
-        f"{b('Demo Test')}\n\nFiring one request with random number {c(phone)}...",
-        parse_mode=PM
+        f"{b('Demo Test')}\n\nFiring one request with random number {c(phone)}...", parse_mode=PM
     )
     await callback.answer()
     result = await testSingleApi(cleanCfg(api), phone)
@@ -882,7 +869,7 @@ async def cbQuickDemo(callback: CallbackQuery) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test single API
+# Test single API (from list)
 # ---------------------------------------------------------------------------
 
 @router.callback_query(F.data.startswith("aapi:testone:"))
@@ -899,7 +886,7 @@ async def cbTestOne(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(ApiAdminStates.waitingTestPhone)
     await state.update_data(testApiDbId=dbId, testApiIdx=None)
     await callback.message.edit_text(
-        f"{b('Test')}  {_esc(api['name'])}\n{c(api['method'])}  {_esc(api['url'])}\n\nEnter a 10-digit phone number.",
+        f"{b('Test')}  {esc(api['name'])}\n{c(api['method'])}  {esc(api['url'])}\n\nEnter a 10-digit phone number.",
         parse_mode=PM
     )
     await callback.answer()
@@ -919,7 +906,7 @@ async def cbTestOneIdx(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(ApiAdminStates.waitingTestPhone)
     await state.update_data(testApiDbId=None, testApiIdx=idx)
     await callback.message.edit_text(
-        f"{b('Test')}  {_esc(api['name'])}\n{c(api['method'])}  {_esc(api['url'])}\n\nEnter a 10-digit phone number.",
+        f"{b('Test')}  {esc(api['name'])}\n{c(api['method'])}  {esc(api['url'])}\n\nEnter a 10-digit phone number.",
         parse_mode=PM
     )
     await callback.answer()
@@ -949,24 +936,24 @@ async def handleTestPhone(message: Message, state: FSMContext) -> None:
         return
     await state.clear()
     cfg     = cleanCfg(api)
-    waiting = await message.answer(f"Testing {_esc(api['name'])}...", parse_mode=PM)
+    waiting = await message.answer(f"Testing {esc(api['name'])}...", parse_mode=PM)
     result  = await testSingleApi(cfg, phone)
     if not result["ok"]:
         await waiting.edit_text(
-            f"{b('Test Failed')}\n\nAPI    {_esc(api['name'])}\nError  {_esc(result['error'])}",
+            f"{b('Test Failed')}\n\nAPI    {esc(api['name'])}\nError  {esc(result['error'])}",
             reply_markup=backToApiMenuKeyboard(), parse_mode=PM
         )
         return
     status  = result["status"]
     latency = result["latencyMs"]
-    snippet = _esc((result.get("snippet") or "(empty)")[:100])
+    snippet = esc((result.get("snippet") or "(empty)")[:100])
     if status == 429:   lbl = "RATE LIMITED"
     elif status < 300:  lbl = "OK"
     elif status < 500:  lbl = "CLIENT ERR"
     else:               lbl = "SERVER ERR"
     await waiting.edit_text(
         f"{b('Test Result')}\n\n"
-        f"API      {_esc(api['name'])}\n"
+        f"API      {esc(api['name'])}\n"
         f"Status   {c(f'{lbl} {status}')}\n"
         f"Latency  {c(f'{latency}ms')}\n\n"
         f"{i('Response')}\n{c(snippet)}",
@@ -1005,30 +992,40 @@ async def cbHealthCheck(callback: CallbackQuery) -> None:
 
     results = await asyncio.gather(*[checkOne(a) for a in allApis])
 
-    ok_list   = [r for r in results if r["result"].get("ok") and 0 < (r["result"].get("status") or 0) < 300]
-    rl_list   = [r for r in results if r["result"].get("status") == 429]
-    err_list  = [r for r in results if r["result"].get("ok") and r["result"].get("status", 0) >= 400 and r["result"].get("status") != 429]
-    dead_list = [r for r in results if not r["result"].get("ok") or r["result"].get("status") is None]
+    okList   = [r for r in results if r["result"].get("ok") and 0 < (r["result"].get("status") or 0) < 300]
+    rlList   = [r for r in results if r["result"].get("status") == 429]
+    errList  = [r for r in results if r["result"].get("ok") and r["result"].get("status", 0) >= 400 and r["result"].get("status") != 429]
+    deadList = [r for r in results if not r["result"].get("ok") or r["result"].get("status") is None]
+
+    # Rate limit bypass detection — APIs that always 429 on first request
+    alwaysRl = [r for r in rlList]
+    rlNote   = ""
+    if alwaysRl:
+        rlNote = f"\n{i(f'{len(alwaysRl)} API(s) returned 429 immediately — consider skipping them.')}"
 
     cacheKey = f"hc_{callback.from_user.id}"
-    _healthCheckCache[cacheKey] = {"phone": phone, "ok": ok_list, "rl": rl_list, "err": err_list, "dead": dead_list}
+    _healthCheckCache[cacheKey] = {
+        "phone": phone, "ok": okList, "rl": rlList, "err": errList, "dead": deadList
+    }
 
     builder = InlineKeyboardBuilder()
-    if ok_list:   builder.button(text=f"OK  ({len(ok_list)})",           callback_data="aapi:hccat:ok:0")
-    if dead_list: builder.button(text=f"Dead  ({len(dead_list)})",       callback_data="aapi:hccat:dead:0")
-    if rl_list:   builder.button(text=f"Rate Limited  ({len(rl_list)})", callback_data="aapi:hccat:rl:0")
-    if err_list:  builder.button(text=f"Errors  ({len(err_list)})",      callback_data="aapi:hccat:err:0")
+    if okList:   builder.button(text=f"OK  ({len(okList)})",           callback_data="aapi:hccat:ok:0")
+    if deadList: builder.button(text=f"Dead  ({len(deadList)})",       callback_data="aapi:hccat:dead:0")
+    if rlList:   builder.button(text=f"Rate Limited  ({len(rlList)})", callback_data="aapi:hccat:rl:0")
+    if errList:  builder.button(text=f"Errors  ({len(errList)})",      callback_data="aapi:hccat:err:0")
+    if deadList: builder.button(text="Skip All Dead",                  callback_data="aapi:skipall_dead")
     builder.button(text="Run Again", callback_data="aapi:health")
     builder.button(text="Back",      callback_data="aapi:menu")
-    builder.adjust(2, 2, 2)
+    builder.adjust(2, 2, 1, 2)
 
     await waiting.edit_text(
         f"{b('Health Check')}\n"
         f"{c(f'Phone: {phone}')}\n\n"
-        f"OK            {c(str(len(ok_list)))}\n"
-        f"Dead          {c(str(len(dead_list)))}\n"
-        f"Rate limited  {c(str(len(rl_list)))}\n"
-        f"Errors        {c(str(len(err_list)))}\n\n"
+        f"OK            {c(str(len(okList)))}\n"
+        f"Dead          {c(str(len(deadList)))}\n"
+        f"Rate limited  {c(str(len(rlList)))}\n"
+        f"Errors        {c(str(len(errList)))}"
+        f"{rlNote}\n\n"
         f"{i('Tap a category to browse.')}",
         reply_markup=builder.as_markup(),
         parse_mode=PM
@@ -1044,26 +1041,27 @@ async def cbHealthSummary(callback: CallbackQuery) -> None:
     if not cache:
         await callback.answer("Results expired. Run health check again.", show_alert=True)
         return
-    ok_list   = cache["ok"]
-    dead_list = cache["dead"]
-    rl_list   = cache["rl"]
-    err_list  = cache["err"]
-    phone     = cache["phone"]
-    builder   = InlineKeyboardBuilder()
-    if ok_list:   builder.button(text=f"OK  ({len(ok_list)})",           callback_data="aapi:hccat:ok:0")
-    if dead_list: builder.button(text=f"Dead  ({len(dead_list)})",       callback_data="aapi:hccat:dead:0")
-    if rl_list:   builder.button(text=f"Rate Limited  ({len(rl_list)})", callback_data="aapi:hccat:rl:0")
-    if err_list:  builder.button(text=f"Errors  ({len(err_list)})",      callback_data="aapi:hccat:err:0")
+    okList   = cache["ok"]
+    deadList = cache["dead"]
+    rlList   = cache["rl"]
+    errList  = cache["err"]
+    phone    = cache["phone"]
+    builder  = InlineKeyboardBuilder()
+    if okList:   builder.button(text=f"OK  ({len(okList)})",           callback_data="aapi:hccat:ok:0")
+    if deadList: builder.button(text=f"Dead  ({len(deadList)})",       callback_data="aapi:hccat:dead:0")
+    if rlList:   builder.button(text=f"Rate Limited  ({len(rlList)})", callback_data="aapi:hccat:rl:0")
+    if errList:  builder.button(text=f"Errors  ({len(errList)})",      callback_data="aapi:hccat:err:0")
+    if deadList: builder.button(text="Skip All Dead",                  callback_data="aapi:skipall_dead")
     builder.button(text="Run Again", callback_data="aapi:health")
     builder.button(text="Back",      callback_data="aapi:menu")
-    builder.adjust(2, 2, 2)
+    builder.adjust(2, 2, 1, 2)
     await callback.message.edit_text(
         f"{b('Health Check')}\n"
         f"{c(f'Phone: {phone}')}\n\n"
-        f"OK            {c(str(len(ok_list)))}\n"
-        f"Dead          {c(str(len(dead_list)))}\n"
-        f"Rate limited  {c(str(len(rl_list)))}\n"
-        f"Errors        {c(str(len(err_list)))}\n\n"
+        f"OK            {c(str(len(okList)))}\n"
+        f"Dead          {c(str(len(deadList)))}\n"
+        f"Rate limited  {c(str(len(rlList)))}\n"
+        f"Errors        {c(str(len(errList)))}\n\n"
         f"{i('Tap a category to browse.')}",
         reply_markup=builder.as_markup(),
         parse_mode=PM
@@ -1076,17 +1074,17 @@ async def cbHcCategory(callback: CallbackQuery) -> None:
     if not isAdmin(callback.from_user.id):
         await callback.answer("Access denied.", show_alert=True)
         return
-    parts    = callback.data.split(":")
-    cat      = parts[2]
-    page     = int(parts[3])
-    cache    = _healthCheckCache.get(f"hc_{callback.from_user.id}")
+    parts      = callback.data.split(":")
+    cat        = parts[2]
+    page       = int(parts[3])
+    cache      = _healthCheckCache.get(f"hc_{callback.from_user.id}")
     if not cache:
         await callback.answer("Results expired.", show_alert=True)
         return
-    catMap   = {"ok": cache["ok"], "dead": cache["dead"], "rl": cache["rl"], "err": cache["err"]}
-    catLabel = {"ok": "OK", "dead": "Dead", "rl": "Rate Limited", "err": "Errors"}
-    entries  = catMap.get(cat, [])
-    total    = len(entries)
+    catMap     = {"ok": cache["ok"], "dead": cache["dead"], "rl": cache["rl"], "err": cache["err"]}
+    catLabel   = {"ok": "OK", "dead": "Dead", "rl": "Rate Limited", "err": "Errors"}
+    entries    = catMap.get(cat, [])
+    total      = len(entries)
     totalPages = max(1, -(-total // HC_PER_PAGE))
     start      = page * HC_PER_PAGE
     builder    = InlineKeyboardBuilder()
@@ -1100,8 +1098,7 @@ async def cbHcCategory(callback: CallbackQuery) -> None:
     builder.adjust(1)
     await callback.message.edit_text(
         f"{b(catLabel[cat] + ' APIs')}  {c(str(total) + ' total')}\n\n{i('Tap an API to see its result.')}",
-        reply_markup=builder.as_markup(),
-        parse_mode=PM
+        reply_markup=builder.as_markup(), parse_mode=PM
     )
     await callback.answer()
 
@@ -1111,10 +1108,10 @@ async def cbHcResult(callback: CallbackQuery) -> None:
     if not isAdmin(callback.from_user.id):
         await callback.answer("Access denied.", show_alert=True)
         return
-    parts    = callback.data.split(":")
-    cat      = parts[2]
-    idx      = int(parts[3])
-    cache    = _healthCheckCache.get(f"hc_{callback.from_user.id}")
+    parts   = callback.data.split(":")
+    cat     = parts[2]
+    idx     = int(parts[3])
+    cache   = _healthCheckCache.get(f"hc_{callback.from_user.id}")
     if not cache:
         await callback.answer("Results expired.", show_alert=True)
         return
@@ -1130,18 +1127,18 @@ async def cbHcResult(callback: CallbackQuery) -> None:
     page   = idx // HC_PER_PAGE
     isSkipped = db.isApiSkipped(name)
     if not res["ok"] or res.get("status") is None:
-        err  = _esc((res.get("error") or "timeout")[:80])
-        text = f"{b(_esc(name))}  {c(method)}\n\nStatus  {c('DEAD')}\nError   {c(err)}"
+        err  = esc((res.get("error") or "timeout")[:80])
+        text = f"{b(esc(name))}  {c(method)}\n\nStatus  {c('DEAD')}\nError   {c(err)}"
     else:
         status  = res["status"]
         latency = res.get("latencyMs", 0)
-        snippet = _esc((res.get("snippet") or "(empty)")[:100])
+        snippet = esc((res.get("snippet") or "(empty)")[:100])
         if status == 429:   lbl = "RATE LIMITED"
         elif status < 300:  lbl = "OK"
         elif status < 500:  lbl = "CLIENT ERR"
         else:               lbl = "SERVER ERR"
         text = (
-            f"{b(_esc(name))}  {c(method)}\n\n"
+            f"{b(esc(name))}  {c(method)}\n\n"
             f"Status   {c(f'{lbl} {status}')}\n"
             f"Latency  {c(f'{latency}ms')}\n\n"
             f"{i('Response')}\n{c(snippet)}"
@@ -1166,10 +1163,10 @@ async def cbHcSkip(callback: CallbackQuery) -> None:
     if not isAdmin(callback.from_user.id):
         await callback.answer("Access denied.", show_alert=True)
         return
-    parts  = callback.data.split(":")
-    cat    = parts[2]
-    idx    = int(parts[3])
-    cache  = _healthCheckCache.get(f"hc_{callback.from_user.id}")
+    parts     = callback.data.split(":")
+    cat       = parts[2]
+    idx       = int(parts[3])
+    cache     = _healthCheckCache.get(f"hc_{callback.from_user.id}")
     if not cache:
         await callback.answer("Results expired.", show_alert=True)
         return
@@ -1193,10 +1190,10 @@ async def cbHcDelete(callback: CallbackQuery) -> None:
     if not isAdmin(callback.from_user.id):
         await callback.answer("Access denied.", show_alert=True)
         return
-    parts  = callback.data.split(":")
-    cat    = parts[2]
-    idx    = int(parts[3])
-    cache  = _healthCheckCache.get(f"hc_{callback.from_user.id}")
+    parts   = callback.data.split(":")
+    cat     = parts[2]
+    idx     = int(parts[3])
+    cache   = _healthCheckCache.get(f"hc_{callback.from_user.id}")
     if not cache:
         await callback.answer("Results expired.", show_alert=True)
         return
@@ -1215,7 +1212,7 @@ async def cbHcDelete(callback: CallbackQuery) -> None:
     await callback.answer(f"Deleted: {name}")
     page = idx // HC_PER_PAGE
     await callback.message.edit_text(
-        f"{b('Deleted')}  {c(_esc(name))}\n\n{i('API removed.')}",
+        f"{b('Deleted')}  {c(esc(name))}\n\n{i('API removed.')}",
         reply_markup=InlineKeyboardBuilder().button(
             text="Back", callback_data=f"aapi:hccat:{cat}:{page}"
         ).adjust(1).as_markup(),
