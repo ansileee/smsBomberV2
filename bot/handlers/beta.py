@@ -1,10 +1,7 @@
 """
 Beta Tester panel — admin-only area for experimental features.
-Currently includes:
-  1. cURL to JSON converter (AI-powered via external free APIs)
-  2. Admin AI Chat
-Note: AI features require working AI backends in config.py AI_BACKENDS.
-      If all backends are down, a maintenance message is shown.
+  1. cURL to API converter (pure Python parser — no AI needed)
+  2. Admin AI Chat (uses external free AI backends, gracefully handles downtime)
 """
 from __future__ import annotations
 
@@ -17,6 +14,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from bot.services.curl_parser import parseCurl
 from bot.services.api_manager import apiManager
 from bot.utils import PM, b, i, c, hEsc as esc, isAdmin
 
@@ -33,21 +31,28 @@ class BetaStates(StatesGroup):
 
 def betaMenuKeyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="cURL to API (AI)", callback_data="beta:curl")
-    builder.button(text="Admin AI Chat",    callback_data="beta:ai_chat")
-    builder.button(text="Back",             callback_data="adm:menu")
+    builder.button(text="cURL to API",   callback_data="beta:curl")
+    builder.button(text="Admin AI Chat", callback_data="beta:ai_chat")
+    builder.button(text="Back",          callback_data="adm:menu")
     builder.adjust(2, 1)
     return builder.as_markup()
 
 
-def curlResultKeyboard(hasJson: bool) -> InlineKeyboardMarkup:
+def curlResultKeyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    if hasJson:
-        builder.button(text="Save to Bot", callback_data="beta:curl_save")
-        builder.button(text="Demo Test",   callback_data="beta:curl_demotest")
-    builder.button(text="Try Another", callback_data="beta:curl")
-    builder.button(text="Beta Menu",   callback_data="beta:menu")
-    builder.adjust(2, 2) if hasJson else builder.adjust(1, 1)
+    builder.button(text="Save to Bot",   callback_data="beta:curl_save")
+    builder.button(text="Demo Test",     callback_data="beta:curl_demotest")
+    builder.button(text="Edit JSON",     callback_data="beta:curl_edit")
+    builder.button(text="Try Another",   callback_data="beta:curl")
+    builder.adjust(2, 2)
+    return builder.as_markup()
+
+
+def curlFailKeyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Try Again",  callback_data="beta:curl")
+    builder.button(text="Beta Menu",  callback_data="beta:menu")
+    builder.adjust(2)
     return builder.as_markup()
 
 
@@ -60,7 +65,7 @@ def adminAiKeyboard() -> InlineKeyboardMarkup:
 
 
 async def _callAi(prompt: str):
-    """Try AI backends. Returns response string or None."""
+    """Try AI backends in order. Returns response or None."""
     from bot.config import AI_BACKENDS
     from urllib.parse import quote
     import aiohttp
@@ -86,26 +91,28 @@ async def _callAi(prompt: str):
     return None
 
 
-CURL_SYSTEM = """You are an expert API config converter for the smsBomber platform.
-Convert any cURL command into our exact JSON config format.
-
-OUTPUT RULES:
-1. Output ONLY valid JSON. No markdown, no backticks, no explanation.
-2. Required fields: name, method, url
-3. Optional: headers, json, data, params, cookies
-4. Strip: cookie, :authority, :method, :path, :scheme, sec-ch-ua, sec-ch-ua-mobile, sec-ch-ua-platform, sec-fetch-dest, sec-fetch-mode, sec-fetch-site, sec-gpc, content-length, accept-encoding, connection, host
-5. Phone detection: replace 10-digit Indian number with {phone}. If prefixed 91 use "91{phone}", +91 use "+91{phone}", integer use 91{phone} (no quotes)
-6. Use "json" for application/json, "data" for form-encoded, "params" for query strings
-7. Name after domain
-
-Example output:
-{"name":"Example","method":"POST","url":"https://api.example.com/otp","headers":{"content-type":"application/json"},"json":{"phone":"{phone}"}}"""
-
 ADMIN_AI_SYSTEM = """You are an AI assistant for the smsBomber OTP testing platform admin.
 Answer questions about: API configs, cURL conversion, platform internals, HTTP concepts, rate limiting, proxy setup.
-Creator: @drazeforce
-Be concise and technical. No emojis."""
+Creator: @drazeforce. Be concise and technical. No emojis."""
 
+ADMIN_AI_WELCOME = (
+    f"{b('Admin AI Chat')}\n\n"
+    f"Ask anything about:\n"
+    f"  - API config format and placeholders\n"
+    f"  - cURL parsing and conversion rules\n"
+    f"  - Platform internals, rate limiting, proxy setup\n"
+    f"  - HTTP request debugging\n\n"
+    f"{b('Example questions')}\n"
+    f"{c('How does the round-robin API queue work?')}\n"
+    f"{c('What headers should I strip from a cURL?')}\n"
+    f"{c('How do I add a SOCKS5 proxy?')}\n\n"
+    f"{i('Type your question below.')}"
+)
+
+
+# ---------------------------------------------------------------------------
+# Entry
+# ---------------------------------------------------------------------------
 
 @router.callback_query(F.data == "beta:menu")
 async def cbBetaMenu(callback: CallbackQuery, state: FSMContext) -> None:
@@ -117,7 +124,8 @@ async def cbBetaMenu(callback: CallbackQuery, state: FSMContext) -> None:
         f"{b('Beta Tester')}\n\n"
         f"Experimental features for admin use.\n\n"
         f"{b('cURL to API')}\n"
-        f"Paste a raw cURL command — AI converts it to our JSON config format.\n\n"
+        f"Paste any raw cURL command — converted instantly to our JSON config format.\n"
+        f"Handles JSON body, form data, query params, cookies, phone detection.\n\n"
         f"{b('Admin AI Chat')}\n"
         f"Ask the AI about APIs, platform internals, HTTP concepts.",
         reply_markup=betaMenuKeyboard(),
@@ -141,8 +149,14 @@ async def cbCurl(callback: CallbackQuery, state: FSMContext) -> None:
     builder.button(text="Cancel", callback_data="beta:menu")
     await callback.message.edit_text(
         f"{b('cURL to API Converter')}\n\n"
-        f"Paste a raw cURL command.\n"
-        f"The AI will parse it and output a ready-to-save JSON config.\n\n"
+        f"Paste a raw cURL command below.\n\n"
+        f"Supported:\n"
+        f"  - JSON body  {c('--data-raw')}\n"
+        f"  - Form body  {c('application/x-www-form-urlencoded')}\n"
+        f"  - Query params in URL\n"
+        f"  - Cookies via {c('-b')} or {c('-H cookie:')}\n"
+        f"  - Phone formats: {c('{phone}')}, {c('91{phone}')}, {c('+91{phone}')}\n"
+        f"  - Multiline cURL with backslash continuations\n\n"
         f"{i('Paste the cURL command now.')}",
         reply_markup=builder.as_markup(),
         parse_mode=PM
@@ -155,50 +169,35 @@ async def handleCurl(message: Message, state: FSMContext) -> None:
     if not isAdmin(message.from_user.id):
         return
     curl = (message.text or "").strip()
-    if not curl.startswith("curl"):
+    if not curl.lower().startswith("curl"):
         await message.answer(
-            f"{b('Invalid')}\n\nInput must start with {c('curl')}.", parse_mode=PM
-        )
-        return
-
-    thinking = await message.answer(f"{i('AI is converting your cURL...')}", parse_mode=PM)
-    prompt   = f"{CURL_SYSTEM}\n\nConvert this cURL:\n{curl}\n\nJSON output:"
-    result   = await _callAi(prompt)
-
-    if not result:
-        await thinking.edit_text(
-            f"{b('AI Unavailable')}\n\n"
-            f"All AI backends are currently unreachable.\n"
-            f"Please try again later or paste the JSON config manually using Add API.",
-            reply_markup=curlResultKeyboard(False),
+            f"{b('Invalid')}\n\nInput must start with {c('curl')}.\nPaste the cURL command directly.",
             parse_mode=PM
         )
         return
 
-    raw = result.strip()
-    if raw.startswith("```"):
-        lines = [l for l in raw.splitlines() if not l.startswith("```")]
-        raw   = "\n".join(lines).strip()
+    ok, cfg, error = parseCurl(curl)
 
-    ok, cfg, error = apiManager.validateApiJson(raw)
     if not ok:
-        await thinking.edit_text(
-            f"{b('Parse Error')}\n\n"
-            f"AI returned a response but it failed validation:\n{c(error)}\n\n"
-            f"AI output:\n<pre>{esc(raw[:400])}</pre>\n\n"
-            f"Try again or paste the JSON manually.",
-            reply_markup=curlResultKeyboard(False),
+        await message.answer(
+            f"{b('Parse Failed')}\n\n{c(error)}\n\n"
+            f"Make sure you paste the full cURL including the URL.\n"
+            f"You can also add the JSON config manually via {b('API Manager')} → Add API.",
+            reply_markup=curlFailKeyboard(),
             parse_mode=PM
         )
         return
 
     await state.update_data(pendingCurlCfg=cfg, pendingCurlJson=json.dumps(cfg))
     await state.set_state(BetaStates.curlConfirm)
+    await _showCurlResult(message, cfg, is_edit=False)
 
+
+async def _showCurlResult(msgOrCallback, cfg: dict, is_edit: bool = True) -> None:
     lines = [f"{b('Converted Successfully')}\n"]
     lines.append(f"Name    {c(esc(cfg['name']))}")
     lines.append(f"Method  {c(cfg['method'])}")
-    lines.append(f"URL     {c(esc(cfg['url']))}")
+    lines.append(f"URL     {c(esc(cfg['url'][:80]))}")
     if cfg.get("headers"):
         lines.append(f"Headers {c(str(len(cfg['headers'])))} fields")
     if cfg.get("json"):
@@ -207,10 +206,19 @@ async def handleCurl(message: Message, state: FSMContext) -> None:
         lines.append(f"Body    Form  {c(str(len(cfg['data'])))} fields")
     if cfg.get("params"):
         lines.append(f"Params  {c(str(len(cfg['params'])))} fields")
-    lines.append(f"\n<pre>{esc(json.dumps(cfg, indent=2))}</pre>")
-    lines.append(f"\n{i('Save it or run a Demo Test first.')}")
+    if cfg.get("cookies"):
+        lines.append(f"Cookies {c(str(len(cfg['cookies'])))} fields")
 
-    await thinking.edit_text("\n".join(lines), reply_markup=curlResultKeyboard(True), parse_mode=PM)
+    # Show full JSON for inspection
+    lines.append(f"\n{b('Full JSON')}")
+    lines.append(f"<pre>{esc(json.dumps(cfg, indent=2))}</pre>")
+    lines.append(f"\n{i('Save it, Demo Test it, or Edit the JSON if needed.')}")
+
+    text = "\n".join(lines)
+    if is_edit:
+        await msgOrCallback.message.edit_text(text, reply_markup=curlResultKeyboard(), parse_mode=PM)
+    else:
+        await msgOrCallback.answer(text, reply_markup=curlResultKeyboard(), parse_mode=PM)
 
 
 @router.callback_query(F.data == "beta:curl_save", StateFilter(BetaStates.curlConfirm))
@@ -218,8 +226,8 @@ async def cbCurlSave(callback: CallbackQuery, state: FSMContext) -> None:
     if not isAdmin(callback.from_user.id):
         await callback.answer("Access denied.", show_alert=True)
         return
-    data    = await state.get_data()
-    cfg     = data.get("pendingCurlCfg")
+    data = await state.get_data()
+    cfg  = data.get("pendingCurlCfg")
     if not cfg:
         await callback.answer("Session expired.", show_alert=True)
         await state.clear()
@@ -228,11 +236,12 @@ async def cbCurlSave(callback: CallbackQuery, state: FSMContext) -> None:
     db.addCustomApi(name=cfg["name"], method=cfg["method"], url=cfg["url"], configJson=json.dumps(cfg))
     await state.clear()
     builder = InlineKeyboardBuilder()
-    builder.button(text="API Manager", callback_data="aapi:menu")
-    builder.button(text="Beta Menu",   callback_data="beta:menu")
-    builder.adjust(2)
+    builder.button(text="API Manager",  callback_data="aapi:menu")
+    builder.button(text="Convert More", callback_data="beta:curl")
+    builder.button(text="Beta Menu",    callback_data="beta:menu")
+    builder.adjust(2, 1)
     await callback.message.edit_text(
-        f"{b('Saved.')}  {esc(cfg['name'])} added to API list.",
+        f"{b('Saved.')}  {esc(cfg['name'])} added to the API list.",
         reply_markup=builder.as_markup(), parse_mode=PM
     )
     await callback.answer("Saved.")
@@ -258,50 +267,85 @@ async def cbCurlDemoTest(callback: CallbackQuery, state: FSMContext) -> None:
     result = await testSingleApi(cfg, phone)
     if not result["ok"]:
         builder = InlineKeyboardBuilder()
-        builder.button(text="Back", callback_data="beta:menu")
+        builder.button(text="Save Anyway", callback_data="beta:curl_save")
+        builder.button(text="Edit JSON",   callback_data="beta:curl_edit")
+        builder.button(text="Back",        callback_data="beta:curl_back")
+        builder.adjust(2, 1)
         await waiting.edit_text(
-            f"{b('Test Failed')}\n\nAPI    {esc(cfg['name'])}\nPhone  {c(phone)}\nError  {c(esc(result['error']))}",
+            f"{b('Test Failed')}\n\n"
+            f"API    {esc(cfg['name'])}\n"
+            f"Phone  {c(phone)}\n"
+            f"Error  {c(esc(result['error']))}\n\n"
+            f"{i('The API may require auth tokens or be rate-limited. You can still save it.')}",
             reply_markup=builder.as_markup(), parse_mode=PM
         )
         return
     status  = result["status"]
     latency = result["latencyMs"]
-    snippet = esc((result.get("snippet") or "(empty)")[:120])
+    snippet = esc((result.get("snippet") or "(empty)")[:200])
     if status == 429:   lbl = "RATE LIMITED"
     elif status < 300:  lbl = "OK"
     elif status < 500:  lbl = "CLIENT ERR"
     else:               lbl = "SERVER ERR"
     builder = InlineKeyboardBuilder()
-    builder.button(text="Save to Bot", callback_data="beta:curl_save")
-    builder.button(text="Beta Menu",   callback_data="beta:menu")
-    builder.adjust(2)
+    builder.button(text="Save to Bot",  callback_data="beta:curl_save")
+    builder.button(text="Test Again",   callback_data="beta:curl_demotest")
+    builder.button(text="Edit JSON",    callback_data="beta:curl_edit")
+    builder.button(text="Beta Menu",    callback_data="beta:menu")
+    builder.adjust(2, 2)
     await waiting.edit_text(
         f"{b('Test Result')}\n\n"
-        f"API      {esc(cfg['name'])}\nPhone    {c(phone)}\n"
-        f"Status   {c(f'{lbl} {status}')}\nLatency  {c(f'{latency}ms')}\n\n"
-        f"{i('Response')}\n{c(snippet)}\n\n{i('Looks good? Save it.')}",
+        f"API      {esc(cfg['name'])}\n"
+        f"Phone    {c(phone)}\n"
+        f"Status   {c(f'{lbl} {status}')}\n"
+        f"Latency  {c(f'{latency}ms')}\n\n"
+        f"{i('Response snippet')}\n{c(snippet)}",
         reply_markup=builder.as_markup(), parse_mode=PM
     )
+
+
+@router.callback_query(F.data == "beta:curl_edit", StateFilter(BetaStates.curlConfirm))
+async def cbCurlEdit(callback: CallbackQuery, state: FSMContext) -> None:
+    if not isAdmin(callback.from_user.id):
+        await callback.answer("Access denied.", show_alert=True)
+        return
+    data = await state.get_data()
+    cfg  = data.get("pendingCurlCfg")
+    if not cfg:
+        await callback.answer("Session expired.", show_alert=True)
+        return
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Back", callback_data="beta:curl_back")
+    await callback.message.edit_text(
+        f"{b('Edit JSON')}\n\n"
+        f"Current config:\n<pre>{esc(json.dumps(cfg, indent=2))}</pre>\n\n"
+        f"Paste the corrected JSON below.",
+        reply_markup=builder.as_markup(), parse_mode=PM
+    )
+    await callback.answer()
+    # Re-use waitingCurl state to accept new JSON
+    await state.set_state(BetaStates.waitingCurl)
+    await state.update_data(editMode=True)
+
+
+@router.callback_query(F.data == "beta:curl_back", StateFilter(BetaStates.curlConfirm))
+async def cbCurlBack(callback: CallbackQuery, state: FSMContext) -> None:
+    if not isAdmin(callback.from_user.id):
+        await callback.answer("Access denied.", show_alert=True)
+        return
+    data = await state.get_data()
+    cfg  = data.get("pendingCurlCfg")
+    if cfg:
+        await _showCurlResult(callback, cfg, is_edit=True)
+    else:
+        callback.data = "beta:curl"
+        await cbCurl(callback, state)
+    await callback.answer()
 
 
 # ---------------------------------------------------------------------------
 # Admin AI Chat
 # ---------------------------------------------------------------------------
-
-ADMIN_AI_WELCOME = (
-    f"{b('Admin AI Chat')}\n\n"
-    f"Ask anything about:\n"
-    f"  - API config format and placeholders\n"
-    f"  - cURL parsing and conversion rules\n"
-    f"  - Platform internals, rate limiting, proxy setup\n"
-    f"  - HTTP request debugging\n\n"
-    f"{b('Example questions')}\n"
-    f"{c('How does the round-robin API queue work?')}\n"
-    f"{c('What headers should I strip from a cURL?')}\n"
-    f"{c('How do I add a SOCKS5 proxy?')}\n\n"
-    f"{i('Type your question below.')}"
-)
-
 
 @router.callback_query(F.data == "beta:ai_chat")
 async def cbAdminAiChat(callback: CallbackQuery, state: FSMContext) -> None:
@@ -339,9 +383,8 @@ async def handleAdminAiMessage(message: Message, state: FSMContext) -> None:
         parts.append(f"AI: {turn['bot']}")
     parts.append(f"User: {userMsg}")
     parts.append("AI:")
-    prompt   = "\n".join(parts)
     thinking = await message.answer(f"{i('AI is thinking...')}", parse_mode=PM)
-    reply    = await _callAi(prompt)
+    reply    = await _callAi("\n".join(parts))
     if not reply:
         await thinking.edit_text(
             f"{b('AI Unavailable')}\n\nAll backends unreachable. Try again shortly.",
